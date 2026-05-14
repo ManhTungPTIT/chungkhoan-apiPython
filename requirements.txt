@@ -1,0 +1,3 @@
+git+https://github.com/thinh-vu/vnstock.git@main
+fastapi
+uvicorn[standard]
