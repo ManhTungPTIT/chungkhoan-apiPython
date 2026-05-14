@@ -9,7 +9,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from main import fetch_intraday
+from main import fetch_intraday, fetch_vn100_info
+
 
 app = FastAPI(title="vnstock Realtime API")
 
@@ -38,3 +39,14 @@ def get_intraday(
     cols = [c for c in ["time", "open", "high", "low", "close"] if c in df.columns]
     records = df[cols].astype(str).to_dict(orient="records")
     return {"symbol": symbol, "date": date, "data": records}
+
+@app.get("/vn100")
+def get_vn100():
+    try: 
+        df = fetch_vn100_info()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    if not df:
+        return {"data": []}
+    return {"data": df}

@@ -21,6 +21,7 @@ import sys
 import time
 
 from vnstock.api.quote import Quote
+from vnstock import Listing
 
 
 def parse_args():
@@ -61,8 +62,25 @@ def fetch_intraday(symbol: str, date: str):
         resolution="1D",
         show_log=False,
     )
-    # return q.intraday(symbol=symbol, show_log=False)
+    
     return a.drop(columns=["volume"])
+
+def fetch_vn100_info() -> list[dict]:
+    from vnstock import Listing, Trading
+    symbols = Listing().symbols_by_group("VN100").tolist()#lay danh sach ma co phieu
+    df = Trading(symbol=symbols[0], source="VCI").price_board(symbols_list=symbols)#gia hien tai cua ma
+    result = []
+    for _, row in df.iterrows():
+        price = row[("match", "match_price")]
+        ref_price = row[("listing", "ref_price")]
+        change_pct = round((price - ref_price) / ref_price * 100, 2) if ref_price else 0
+        result.append({
+            "symbol": row[("listing", "symbol")],
+            "price": price,
+            "change_pct": change_pct,
+        })
+    return result
+
 
 
 def display(symbol: str, interval: int, df, last_updated: str):
@@ -99,7 +117,8 @@ def main():
 
     while True:
         try:
-            df = fetch_intraday(args.symbol, args.date)
+            # df = fetch_intraday(args.symbol, args.date)
+            df = fetch_vn100_info()
             last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             display(args.symbol, args.interval, df, last_updated)
         except KeyboardInterrupt:
