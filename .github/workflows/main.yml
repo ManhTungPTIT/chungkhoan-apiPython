@@ -1,0 +1,155 @@
+name: Deploy Stock Backend Python
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  # Registry
+  REGISTRY: docker-registry.slink.ai.vn
+  REGISTRY_PROTOCOL: https
+  REGISTRY_CONTAINER_NAME: private-registry
+  REGISTRY_CONFIG_PATH: /etc/docker/registry/config.yml
+
+  # Image / container
+  IMAGE_NAME: stock-backend-python
+  CONTAINER_NAME: stock-backend-python
+  ENV_FILE: /home/ci/stock-backend-python/.env
+  PORT: 8808
+
+  # Cleanup policy
+  KEEP_LAST_TAGS: 1
+  ENABLE_REGISTRY_CLEANUP: "true"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Lấy SHORT_SHA (7 ký tự)
+      - name: Set SHORT_SHA
+        run: echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
+
+      # 3. Setup Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. Login private registry
+      - name: Log in to private registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # 5. Build & Push
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6. SSH deploy & cleanup
+      - name: SSH to server and deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: REGISTRY,IMAGE_NAME,SHORT_SHA,CONTAINER_NAME,ENV_FILE,PORT,REGISTRY_PROTOCOL,REGISTRY_CONTAINER_NAME,REGISTRY_CONFIG_PATH,KEEP_LAST_TAGS,ENABLE_REGISTRY_CLEANUP
+          script: |
+            set -euo pipefail
+
+            # ======================
+            # Variables
+            # ======================
+            IMAGE="${REGISTRY}/${IMAGE_NAME}:${SHORT_SHA}"
+            REGISTRY_URL="${REGISTRY_PROTOCOL}://${REGISTRY}"
+
+            echo "👉 Login registry"
+            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "$REGISTRY" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+            echo "👉 Pull image $IMAGE"
+            docker pull "$IMAGE"
+
+            echo "👉 Restart container"
+            docker stop "$CONTAINER_NAME" || true
+            docker rm "$CONTAINER_NAME" || true
+            # Kiểm tra file env tồn tại trước khi chạy
+            if [ ! -f "$ENV_FILE" ]; then
+              echo "❌ Error: ENV_FILE $ENV_FILE is missing. Cannot deploy."
+              exit 1 # Dừng workflow tại đây để bảo vệ hệ thống
+            fi
+
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --env-file "$ENV_FILE" \
+              -p "${PORT}:${PORT}" \
+              "$IMAGE"
+
+            # ======================
+            # Local Docker cleanup
+            # ======================
+            echo "👉 Cleanup unused local images"
+            #docker image prune -af --filter "until=24h" => Chỉ xóa những image đã được tạo ra cách đây hơn 24 giờ => tránh việc xóa nhầm các bản build vừa mới tạo xong hoặc đang trong quá trình deploy
+            docker image prune -af
+
+            echo "👉 Cleanup build cache"
+            docker builder prune -f
+
+            # ======================
+            # Registry cleanup
+            # ======================
+            if [ "$ENABLE_REGISTRY_CLEANUP" = "true" ]; then
+              echo "👉 Registry cleanup enabled"
+
+              if ! command -v jq >/dev/null 2>&1; then
+                echo "❌ jq is required but not installed"
+                exit 1
+              fi
+
+              echo "👉 Fetch tags list"
+              TAGS=$(curl -sf -u "${{ secrets.REGISTRY_USER }}:${{ secrets.REGISTRY_PASSWORD }}" \
+                "$REGISTRY_URL/v2/$IMAGE_NAME/tags/list" \
+                | jq -r '.tags | select(. != null) | .[]' || echo "")
+
+              if [ -z "$TAGS" ]; then
+                echo "ℹ️ No tags found to clean."
+              else
+                COUNT=0
+                for TAG in $TAGS; do
+                  COUNT=$((COUNT+1))
+                  if [ "$COUNT" -le "$KEEP_LAST_TAGS" ]; then
+                    continue
+                  fi
+
+                  echo "👉 Removing tag $TAG"
+                  DIGEST=$(curl -sI -u "${{ secrets.REGISTRY_USER }}:${{ secrets.REGISTRY_PASSWORD }}" \
+                    -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                    "$REGISTRY_URL/v2/$IMAGE_NAME/manifests/$TAG" \
+                    | awk -F': ' '/[Dd]ocker-[Cc]ontent-[Dd]igest/ {print $2}' | tr -d '\r' | xargs)
+
+                  if [ -n "$DIGEST" ]; then
+                    curl -sf -u "${{ secrets.REGISTRY_USER }}:${{ secrets.REGISTRY_PASSWORD }}" -X DELETE \
+                      "$REGISTRY_URL/v2/$IMAGE_NAME/manifests/$DIGEST"
+                  fi
+                done
+                
+                # Thực hiện giải phóng dung lượng thực tế
+                echo "👉 Run registry garbage-collect"
+                docker exec "$REGISTRY_CONTAINER_NAME" bin/registry garbage-collect "$REGISTRY_CONFIG_PATH" --delete-untagged=true || echo "GC failed but continuing..."
+              fi
+            else
+              echo "⚠️ Registry cleanup disabled"
+            fi
+
+            echo "✅ Deploy & cleanup completed successfully"

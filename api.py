@@ -22,7 +22,7 @@ app.add_middleware(
 )
 
 
-@app.get("/intraday")
+@app.get("/api/python/intraday")
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),
     date: str = Query(default=str(datetime.date.today()), description="Date YYYY-MM-DD"),
@@ -40,7 +40,7 @@ def get_intraday(
     records = df[cols].astype(str).to_dict(orient="records")
     return {"symbol": symbol, "date": date, "data": records}
 
-@app.get("/vn100")
+@app.get("/api/python/vn100")
 def get_vn100():
     try: 
         df = fetch_vn100_info()
