@@ -1,3 +1,8 @@
 git+https://github.com/thinh-vu/vnstock.git@main
 fastapi
 uvicorn[standard]
+
+# dev / test
+pytest
+pytest-asyncio
+httpx

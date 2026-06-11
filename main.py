@@ -1,16 +1,11 @@
-"""
-main.py — Công cụ xem giá cổ phiếu intraday theo thời gian thực trên terminal.
+"""main.py — Công cụ xem bảng VN100 trên terminal (dùng cho kiểm tra tay).
 
 Cách dùng:
-    python main.py --symbol TCB --interval 60
+    python main.py --interval 60
 
-Tham số dòng lệnh:
-    --symbol    Mã cổ phiếu cần theo dõi (mặc định: TCB)
-    --date      Ngày lấy dữ liệu, định dạng YYYY-MM-DD (mặc định: hôm nay)
-    --interval  Số giây giữa mỗi lần làm mới dữ liệu (mặc định: 60)
-
-Dữ liệu được lấy từ vnstock qua nguồn VCI, hiển thị dạng bảng trên terminal
-và tự động làm mới theo chu kỳ cho đến khi người dùng nhấn Ctrl+C.
+CLI này dùng lại cùng đường lấy dữ liệu với API (data_source + vn100_service),
+tức gọi gộp `price_board` 1 request cho cả nhóm VN100 thay vì fan-out 100 request.
+Tự làm mới theo chu kỳ cho đến khi nhấn Ctrl+C.
 """
 
 import argparse
@@ -20,111 +15,65 @@ import os
 import sys
 import time
 
-from vnstock.api.quote import Quote
-from vnstock import Listing
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+import data_source
+import vn100_service
 
 
 def parse_args():
-    """Đọc và trả về các tham số từ dòng lệnh."""
-    parser = argparse.ArgumentParser(description="Real-time intraday stock price fetcher")
-    parser.add_argument("--symbol", default="TCB", help="Stock ticker code (default: TCB)")
+    parser = argparse.ArgumentParser(description="VN100 board viewer (terminal)")
     parser.add_argument(
-        "--date",
-        default=str(datetime.date.today()),
-        help="Date in YYYY-MM-DD format (default: today)",
-    )
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=60,
-        help="Seconds between each refresh (default: 60)",
+        "--interval", type=int, default=60, help="Seconds between refreshes (default: 60)"
     )
     return parser.parse_args()
 
 
-def fetch_intraday(symbol: str, date: str):
-    """
-    Lấy dữ liệu giao dịch intraday của mã cổ phiếu từ vnstock (nguồn VCI).
-
-    Tham số:
-        symbol  Mã cổ phiếu, ví dụ: "TCB", "VNM", "HPG"
-        date    Ngày cần lấy (hiện tại vnstock tự xác định ngày theo phiên mới nhất)
-
-    Trả về:
-        DataFrame gồm các cột: time, price, volume, match_type, id
-        Mỗi dòng là một lệnh khớp trong phiên giao dịch.
-    """
-    q = Quote(symbol=symbol, source="VCI")
-    a = q.history(
-        symbol=symbol,
-        start="2025-01-01",
-        end=date,
-        resolution="1D",
-        show_log=False,
-    )
-    
-    return a.drop(columns=["volume"])
-
-def fetch_vn100_info() -> list[dict]:
-    from vnstock import Listing, Trading
-    symbols = Listing().symbols_by_group("VN100").tolist()#lay danh sach ma co phieu
-    df = Trading(symbol=symbols[0], source="VCI").price_board(symbols_list=symbols)#gia hien tai cua ma
-    result = []
-    for _, row in df.iterrows():
-        price = row[("match", "match_price")]
-        ref_price = row[("listing", "ref_price")]
-        change_pct = round((price - ref_price) / ref_price * 100, 2) if ref_price else 0
-        result.append({
-            "symbol": row[("listing", "symbol")],
-            "price": price,
-            "change_pct": change_pct,
-        })
-    return result
+def fetch_board():
+    """Lấy bảng VN100 đã lọc/sort, dùng lại logic của service. Trả None nếu lỗi."""
+    symbols = data_source.fetch_vn100_symbols()
+    if not symbols:
+        return None
+    board = data_source.fetch_vn100_board(symbols)
+    if board is None:
+        return None
+    return vn100_service._process(board)
 
 
-
-def display(symbol: str, interval: int, df, last_updated: str):
-    """
-    Xóa màn hình terminal và in lại bảng dữ liệu mới nhất.
-
-    Tham số:
-        symbol       Mã cổ phiếu (để hiển thị trên tiêu đề)
-        interval     Chu kỳ làm mới (giây), chỉ dùng để hiển thị thông tin
-        df           DataFrame dữ liệu intraday
-        last_updated Thời điểm lấy dữ liệu gần nhất (chuỗi)
-    """
+def display(interval: int, board, last_updated: str):
     os.system("cls" if os.name == "nt" else "clear")
-    print(f"[{symbol}] Last updated: {last_updated}  (refreshing every {interval}s)")
+    print(f"VN100 — Last updated: {last_updated}  (refreshing every {interval}s)")
     print("-" * 60)
-    print(df)
+    if not board:
+        print("⚠  Chưa có dữ liệu — đang chờ API cập nhật...")
+    else:
+        print(f"{'Symbol':<8}{'Price':>12}{'Change%':>10}{'Value':>18}")
+        for row in board:
+            print(
+                f"{row['symbol']:<8}{row['price']:>12}"
+                f"{row['change_pct']:>10}{row['value']:>18,}"
+            )
     print("\nPress Ctrl+C to stop.")
 
 
 def main():
-    """
-    Vòng lặp chính: lấy dữ liệu → hiển thị → chờ → lặp lại.
-
-    Luồng hoạt động:
-        1. Đọc tham số dòng lệnh (symbol, date, interval)
-        2. Gọi fetch_intraday() để lấy dữ liệu từ vnstock
-        3. Gọi display() để in bảng lên terminal
-        4. Chờ `interval` giây rồi quay lại bước 2
-        5. Dừng khi người dùng nhấn Ctrl+C
-    """
     args = parse_args()
-    print(f"Starting real-time feed for {args.symbol} | date={args.date} | interval={args.interval}s")
+    print(f"Starting VN100 feed | interval={args.interval}s")
     print("Fetching first batch...")
 
+    last_board = None
     while True:
         try:
-            # df = fetch_intraday(args.symbol, args.date)
-            df = fetch_vn100_info()
+            board = fetch_board()
+            if board is not None:
+                last_board = board
             last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            display(args.symbol, args.interval, df, last_updated)
+            display(args.interval, last_board, last_updated)
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            # Nếu API lỗi (mất mạng, rate limit...) thì in thông báo và thử lại sau
             print(f"[ERROR] {e} — retrying in {args.interval}s")
         time.sleep(args.interval)
 
