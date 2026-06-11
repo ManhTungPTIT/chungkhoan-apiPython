@@ -37,14 +37,44 @@ app.add_middleware(
 )
 
 
+<<<<<<< HEAD
 @app.get("/vn100")
 def get_vn100():
     return vn100_service.get_board()
 
 
 @app.get("/intraday")
+=======
+@app.get("/api/python/intraday")
+>>>>>>> 9d07251d60a931c4668bdb940a8a869c70dd84dd
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),
 ):
+<<<<<<< HEAD
     result = intraday_service.get_intraday(symbol)
     return {"symbol": symbol, **result}
+=======
+    try:
+        df = fetch_intraday(symbol=symbol, date=date)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    
+    if df is None or df.empty:
+        return {"symbol": symbol, "date": date, "data": []}
+
+    cols = [c for c in ["time", "open", "high", "low", "close"] if c in df.columns]
+    records = df[cols].astype(str).to_dict(orient="records")
+    return {"symbol": symbol, "date": date, "data": records}
+
+@app.get("/api/python/vn100")
+def get_vn100():
+    try: 
+        df = fetch_vn100_info()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    if not df:
+        return {"data": []}
+    return {"data": df}
+>>>>>>> 9d07251d60a931c4668bdb940a8a869c70dd84dd
