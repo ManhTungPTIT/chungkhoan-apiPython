@@ -37,12 +37,12 @@ app.add_middleware(
 )
 
 
-@app.get("/vn100")
+@app.get("/api/python/vn100")
 def get_vn100():
     return vn100_service.get_board()
 
 
-@app.get("/intraday")
+@app.get("/api/python/intraday")
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),
 ):
