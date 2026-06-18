@@ -16,6 +16,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 import intraday_service
+import sector_service
 import vn100_service
 
 
@@ -48,3 +49,22 @@ def get_intraday(
 ):
     result = intraday_service.get_intraday(symbol)
     return {"symbol": symbol, **result}
+
+
+@app.get("/api/python/sectors")
+def get_sectors():
+    return sector_service.get_sectors()
+
+
+@app.get("/api/python/sectors/symbols")
+def get_sector_symbols(
+    icb_code: str = Query(description="ICB level-3 code, e.g. 8350 (Ngân hàng)"),
+):
+
+    return sector_service.get_sector_symbols(icb_code)
+
+
+@app.get("/api/python/heatmap")
+def get_heatmap():
+    """Treemap bản đồ nhiệt: [{ group, icb_code, symbols:[{symbol, change_pct, market_cap}] }]."""
+    return sector_service.get_heatmap()

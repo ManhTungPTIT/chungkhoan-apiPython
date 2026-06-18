@@ -1,14 +1,4 @@
-"""Điểm DUY NHẤT chạm thư viện vnstock.
 
-Mọi lời gọi vnstock được bọc `except BaseException` tại đây. Lý do: khi chạm
-rate-limit, vnstock gọi sys.exit() → ném `SystemExit` (kế thừa BaseException,
-KHÔNG phải Exception). Nếu chỉ bắt `Exception` thì SystemExit thoát ra và làm
-endpoint trả 500. Bắt `BaseException` ở một nơi duy nhất giúp toàn hệ thống xuống
-cấp êm: trả None để lớp trên giữ dữ liệu tốt gần nhất.
-
-Hàm fetch nhận tham số `*_fn` cho phép tiêm nguồn dữ liệu giả khi kiểm thử
-(không gọi vnstock thật).
-"""
 
 import logging
 from typing import Callable, Optional
@@ -36,6 +26,13 @@ def _default_history(symbol: str, start: str, end: str):
     return Quote(symbol=symbol, source=VCI).history(
         start=start, end=end, interval="1D"
     )
+
+
+def _default_industries():
+    from vnstock import Listing
+
+    # Nguồn VCI cung cấp phân cấp ICB đầy đủ; nguồn mặc định (KBS) chỉ tới cấp 2.
+    return Listing(source=VCI).symbols_by_industries()
 
 
 def fetch_vn100_symbols(
@@ -98,8 +95,39 @@ def _map_board(df) -> list[dict]:
                 "price": price,
                 "change_pct": change_pct,
                 "value": value_millions * 1_000_000,
+                # OHLC phiên hôm nay — sẵn trong price_board, dùng cho /sectors.
+                "open": row[("match", "open_price")],
+                "high": row[("match", "highest")],
+                "low": row[("match", "lowest")],
+                "close": price,
             }
         )
+    return out
+
+
+def fetch_industry_map(
+    industries_fn: Callable = _default_industries,
+) -> Optional[dict]:
+    """Bản đồ mã → nhóm ngành ICB cấp 3. Trả None nếu lỗi (kể cả rate-limit)."""
+    try:
+        df = industries_fn()
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("symbols_by_industries thất bại: %s", _short(e))
+        return None
+
+    if df is None or getattr(df, "empty", False):
+        return {}
+    return _map_industries(df)
+
+
+def _map_industries(df) -> dict:
+    lvl3 = df[df["icb_level"] == 3]
+    out = {}
+    for _, row in lvl3.iterrows():
+        out[row["symbol"]] = {
+            "icb_code": str(row["icb_code"]),
+            "icb_name": row["icb_name"],
+        }
     return out
 
 
