@@ -4,6 +4,7 @@ Lúc khởi động warm danh sách mã VN100 (memoize). data_source vẫn bắt
 BaseException nên endpoint không bao giờ trả 500 vì lỗi dữ liệu.
 """
 
+import asyncio
 import io
 import sys
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import intraday_service
 import sector_service
+import signal_service
 import vn100_service
 
 
@@ -25,6 +27,10 @@ async def lifespan(app: FastAPI):
     # Warm danh sách mã VN100 lúc khởi động (memoize). Lỗi cũng không sao —
     # request /vn100 đầu tiên sẽ tự thử lại.
     vn100_service.get_symbols()
+    # Nạp cache tín hiệu từ đĩa (phục vụ ngay) + chạy scheduler nền: warm nếu
+    # cache cũ rồi refresh 1 lần/ngày sau đóng cửa. Không chặn server start.
+    signal_service.load_cache()
+    asyncio.create_task(signal_service.scheduler_loop())
     yield
 
 
@@ -46,9 +52,12 @@ def get_vn100():
 @app.get("/api/python/intraday")
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),
+    interval: str = Query(
+        "1d", description="Khung thời gian: 1m,5m,15m,30m,1h,1d,1w,1mth"
+    ),
 ):
-    result = intraday_service.get_intraday(symbol)
-    return {"symbol": symbol, **result}
+    result = intraday_service.get_intraday(symbol, interval)
+    return {"symbol": symbol, "interval": interval, **result}
 
 
 @app.get("/api/python/sectors")

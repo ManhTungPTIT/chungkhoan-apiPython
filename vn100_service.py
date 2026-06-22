@@ -31,12 +31,34 @@ def get_symbols(fetch_fn=data_source.fetch_vn100_symbols) -> list[str]:
     return _symbols
 
 
+def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
+    """Mã VN100 có value giao dịch > VALUE_THRESHOLD — cùng tập với bảng hiển thị.
+
+    1 request price_board để lấy value rồi lọc + sort. Dùng cho signal_service:
+    chỉ tính tín hiệu cho các mã đang giao dịch đủ lớn (né mã thanh khoản thấp).
+    Không có mã nền / board fetch lỗi (None) → [] để lần sau thử lại (self-heal).
+    """
+    symbols = get_symbols()
+    if not symbols:
+        return []
+    board = fetch_fn(symbols)
+    if not board:
+        return []
+    return [x["symbol"] for x in _process(board)]
+
+
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
-    """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort."""
+    """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu.
+
+    Tín hiệu mua/bán (field `signal`) lấy từ cache của signal_service (tính nền,
+    1 lần/phiên) — import trễ để tránh vòng lặp import (signal_service cần vn100_service).
+    """
     symbols = get_symbols()
     if not symbols:
         return {"data": []}
     board = fetch_fn(symbols)
     if board is None:
         return {"data": []}
-    return {"data": _process(board)}
+    import signal_service
+
+    return {"data": signal_service.attach_signals(_process(board))}

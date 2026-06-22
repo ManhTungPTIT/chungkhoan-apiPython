@@ -20,11 +20,11 @@ def _default_price_board(symbols: list[str]):
     return Trading(symbol=symbols[0], source=VCI).price_board(symbols)
 
 
-def _default_history(symbol: str, start: str, end: str):
+def _default_history(symbol: str, start: str, end: str, interval: str = "1D"):
     from vnstock.api.quote import Quote
 
     return Quote(symbol=symbol, source=VCI).history(
-        start=start, end=end, interval="1D"
+        start=start, end=end, interval=interval
     )
 
 
@@ -66,11 +66,12 @@ def fetch_intraday_history(
     symbol: str,
     start: str,
     end: str,
+    interval: str = "1D",
     history_fn: Callable = _default_history,
 ) -> Optional[list[dict]]:
-    """Lấy nến lịch sử 1 mã. Trả None nếu lỗi (kể cả rate-limit)."""
+    """Lấy nến lịch sử 1 mã theo khung interval. Trả None nếu lỗi (kể cả rate-limit)."""
     try:
-        df = history_fn(symbol, start, end)
+        df = history_fn(symbol, start, end, interval=interval)
     except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
         logger.warning("history(%s) thất bại: %s", symbol, _short(e))
         return None
@@ -132,9 +133,14 @@ def _map_industries(df) -> dict:
 
 
 def _map_history(df) -> list[dict]:
-    cols = [c for c in ["time", "open", "high", "low", "close"] if c in df.columns]
-    df = df[cols].dropna(how="all")
-    return df[cols].astype(str).to_dict(orient="records")
+    cols = [c for c in ["time", "open", "high", "low", "close", "volume"] if c in df.columns]
+    df = df[cols]
+    # vnstock pad nến giờ nghỉ/lễ bằng NaN OHLC; bỏ để FE không nhận "nan"
+    # (một nến NaN làm hỏng thang giá → chart trắng).
+    ohlc = [c for c in ["open", "high", "low", "close"] if c in cols]
+    if ohlc:
+        df = df.dropna(subset=ohlc)
+    return df.astype(str).to_dict(orient="records")
 
 
 def _short(e: BaseException) -> str:
