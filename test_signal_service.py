@@ -81,6 +81,25 @@ def test_uptrend_then_downtrend_buy_then_sell():
     assert isinstance(sell["price"], float)
 
 
+def test_latest_signal_counts_sessions_since_signal():
+    """sessions = số phiên từ nến tín hiệu tới nến cuối (khớp vị trí theo date)."""
+    candles = signal_service._to_candles(_raw(_curved_closes()))
+    sig = signal_service.latest_signal(candles)
+    idx = next(i for i, c in enumerate(candles) if str(c["time"]) == sig["date"])
+    assert sig["sessions"] == (len(candles) - 1) - idx
+
+
+def test_latest_signal_sessions_zero_when_signal_on_last_candle():
+    """Tín hiệu rơi đúng nến cuối (đổi 'hôm nay') → sessions = 0."""
+    full = signal_service._to_candles(_raw(_curved_closes()))
+    sig = signal_service.latest_signal(full)
+    idx = next(i for i, c in enumerate(full) if str(c["time"]) == sig["date"])
+    trimmed = full[: idx + 1]  # cắt để nến tín hiệu là nến cuối
+    sig2 = signal_service.latest_signal(trimmed)
+    assert sig2["date"] == sig["date"]
+    assert sig2["sessions"] == 0
+
+
 # ----- refresh_signals -----
 
 def _setup_cache(monkeypatch, tmp_path, symbols):
@@ -322,18 +341,59 @@ def test_attach_signals_merges_field(monkeypatch):
     monkeypatch.setattr(
         signal_service,
         "_cache",
-        {"last_refresh": "2026-06-20", "signals": {"TCB": {"signal": "buy", "date": "d", "price": 1.0}}},
+        {"last_refresh": "2026-06-20", "signals": {"TCB": {"signal": "buy", "date": "d", "price": 1.0, "sessions": 7}}},
     )
     board = [{"symbol": "TCB", "price": 23}, {"symbol": "VNM", "price": 50}]
     out = signal_service.attach_signals(board)
     assert out[0]["signal"] == "buy"
+    assert out[0]["signal_date"] == "d"
+    assert out[0]["signal_price"] == 1.0
+    assert out[0]["signal_sessions"] == 7
+    assert out[0]["price"] == 23  # KHÔNG đè giá hiện tại của board
     assert out[1]["signal"] is None  # chưa có trong cache
+    assert out[1]["signal_date"] is None
+    assert out[1]["signal_price"] is None
+    assert out[1]["signal_sessions"] is None
+
+
+def test_attach_signals_sessions_none_for_legacy_entry_without_field(monkeypatch):
+    """Cache cũ/seed chưa có 'sessions' → signal_sessions = None (không KeyError)."""
+    monkeypatch.setattr(
+        signal_service,
+        "_cache",
+        {"last_refresh": "x", "signals": {"TCB": {"signal": "buy", "date": "d", "price": 1.0}}},
+    )
+    out = signal_service.attach_signals([{"symbol": "TCB", "price": 23}])
+    assert out[0]["signal_sessions"] is None
 
 
 # ----- load_cache -----
 
+def test_resolve_cache_file_honors_env(monkeypatch):
+    monkeypatch.setenv("SIGNAL_CACHE_FILE", "/data/sig.json")
+    assert signal_service._resolve_cache_file() == "/data/sig.json"
+
+
+def test_resolve_cache_file_default(monkeypatch):
+    monkeypatch.delenv("SIGNAL_CACHE_FILE", raising=False)
+    assert signal_service._resolve_cache_file().endswith("signal_cache.json")
+
+
+def test_load_cache_falls_back_to_seed(monkeypatch, tmp_path):
+    """CACHE_FILE thiếu → nạp seed commit sẵn (cold start có signal ngay)."""
+    seed = tmp_path / "seed.json"
+    payload = {"last_refresh": "2026-06-20", "signals": {"TCB": {"signal": "buy", "date": "d", "price": 1.0}}}
+    seed.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(signal_service, "CACHE_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(signal_service, "SEED_FILE", str(seed))
+    monkeypatch.setattr(signal_service, "_cache", {"last_refresh": None, "signals": {}})
+    cache = signal_service.load_cache()
+    assert cache["signals"]["TCB"]["signal"] == "buy"
+
+
 def test_load_cache_missing_file(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_service, "CACHE_FILE", str(tmp_path / "nope.json"))
+    monkeypatch.setattr(signal_service, "SEED_FILE", str(tmp_path / "noseed.json"))
     monkeypatch.setattr(signal_service, "_cache", {"last_refresh": "x", "signals": {"A": 1}})
     cache = signal_service.load_cache()
     assert cache == {"last_refresh": None, "signals": {}}
@@ -343,6 +403,7 @@ def test_load_cache_corrupt_file(monkeypatch, tmp_path):
     f = tmp_path / "signal_cache.json"
     f.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(signal_service, "CACHE_FILE", str(f))
+    monkeypatch.setattr(signal_service, "SEED_FILE", str(tmp_path / "noseed.json"))
     monkeypatch.setattr(signal_service, "_cache", {"last_refresh": "x", "signals": {}})
     cache = signal_service.load_cache()
     assert cache == {"last_refresh": None, "signals": {}}

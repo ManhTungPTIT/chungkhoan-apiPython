@@ -25,8 +25,25 @@ logger = logging.getLogger(__name__)
 
 VN_TZ = timezone(timedelta(hours=7))
 HISTORY_START = "2025-01-01"
-CACHE_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.json")
-THROTTLE_S = 0.7  # giãn cách giữa mỗi mã: ~100 mã ≈ 70s/lần refresh
+
+
+def _resolve_cache_file():
+    """Đường dẫn cache runtime. Cho phép trỏ sang volume bền qua env
+    SIGNAL_CACHE_FILE (môi trường read-only/ephemeral) — mặc định cạnh module."""
+    return os.environ.get("SIGNAL_CACHE_FILE") or os.path.join(
+        os.path.dirname(__file__), "signal_cache.json"
+    )
+
+
+CACHE_FILE = _resolve_cache_file()
+# Seed commit sẵn (KHÔNG gitignore): cold start chưa có cache runtime vẫn có
+# signal hiển thị ngay, khỏi đợi warm refresh. Tín hiệu nến-ngày nên seed cũ vẫn
+# đúng tới 15:05; warm refresh sau đó tự cập nhật.
+SEED_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.seed.json")
+# Giãn cách giữa mỗi mã. Gói Community vnstock giới hạn 60 request/phút, nên
+# throttle phải ≥1.0s (≤60/phút); 1.1s (~54/phút) để có biên an toàn — nếu nhanh
+# hơn, một phần mã bị rate-limit mỗi lần refresh. ~100 mã ≈ 110s/lần.
+THROTTLE_S = 1.1
 REFRESH_HOUR = 15  # ~15:05 giờ VN, sau khi phiên đóng cửa
 REFRESH_MINUTE = 5
 
@@ -113,9 +130,14 @@ def compute_signals(candles):
 
 
 def latest_signal(candles):
-    """Tín hiệu gần nhất, hoặc None nếu chưa đủ dữ liệu / chưa có tín hiệu."""
+    """Tín hiệu gần nhất kèm `sessions` = số phiên từ nến tín hiệu tới nến cuối
+    (0 = đổi ngay ở phiên gần nhất). None nếu chưa đủ dữ liệu / chưa có tín hiệu."""
     sigs = compute_signals(candles)
-    return sigs[-1] if sigs else None
+    if not sigs:
+        return None
+    last = sigs[-1]
+    idx = next(i for i, c in enumerate(candles) if str(c["time"]) == last["date"])
+    return {**last, "sessions": (len(candles) - 1) - idx}
 
 
 def _to_candles(raw):
@@ -138,17 +160,27 @@ def _to_candles(raw):
 
 # ===== Cache file =====
 
-def load_cache():
-    """Nạp cache từ đĩa. File thiếu/hỏng → reset rỗng (self-heal ở lần refresh sau)."""
-    global _cache
+def _read_cache_file(path):
+    """Đọc + validate 1 file cache. Trả dict hợp lệ, hoặc None nếu thiếu/hỏng."""
     try:
-        with open(CACHE_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("signals"), dict):
-            _cache = {"last_refresh": data.get("last_refresh"), "signals": data["signals"]}
-        else:
-            _cache = {"last_refresh": None, "signals": {}}
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("signals"), dict):
+        return data
+    return None
+
+
+def load_cache():
+    """Nạp cache runtime (CACHE_FILE); thiếu/hỏng → fallback seed commit sẵn
+    (SEED_FILE) để cold start có signal ngay; cả hai hỏng → rỗng (self-heal ở
+    lần refresh sau)."""
+    global _cache
+    data = _read_cache_file(CACHE_FILE) or _read_cache_file(SEED_FILE)
+    if data:
+        _cache = {"last_refresh": data.get("last_refresh"), "signals": data["signals"]}
+    else:
         _cache = {"last_refresh": None, "signals": {}}
     return _cache
 
@@ -263,11 +295,20 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
 
 
 def attach_signals(board):
-    """Gắn field `signal` ("buy"/"sell"/None) vào mỗi row board theo symbol."""
+    """Gắn tín hiệu gần nhất vào mỗi row board theo symbol:
+      signal          — "buy"/"sell"/None
+      signal_date     — ngày phát tín hiệu (None nếu chưa có)
+      signal_price    — giá tại điểm tín hiệu (None nếu chưa có)
+      signal_sessions — số phiên từ điểm tín hiệu tới phiên gần nhất (0 = đổi hôm nay)
+    Dùng key có tiền tố `signal_` để không đè `price`/giá hiện tại của board.
+    `.get("sessions")` để tương thích cache/seed cũ chưa có field này (→ None)."""
     sigs = _cache["signals"]
     for row in board:
         entry = sigs.get(row.get("symbol"))
         row["signal"] = entry["signal"] if entry else None
+        row["signal_date"] = entry["date"] if entry else None
+        row["signal_price"] = entry["price"] if entry else None
+        row["signal_sessions"] = entry.get("sessions") if entry else None
     return board
 
 
