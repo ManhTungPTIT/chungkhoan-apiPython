@@ -59,6 +59,10 @@ RETRY_INTERVAL_S = 60
 
 # Cache nội bộ: {"last_refresh": "YYYY-MM-DD", "signals": {symbol: {signal, date, price}}}
 _cache = {"last_refresh": None, "signals": {}}
+# Khối lượng khớp phiên gần nhất {symbol: volume} của MỌI mã fetch được (kể cả mã
+# chưa có tín hiệu) — phục vụ homepage_service xếp hạng top volume. Lưu kèm cache
+# file dưới key "volumes" để restart không phải đợi refresh.
+_volumes: dict[str, int] = {}
 # Hàng đợi mã còn fetch lỗi cần retry mỗi phút (xem _drain_pending).
 _pending: list[str] = []
 _refresh_lock = threading.Lock()
@@ -176,19 +180,22 @@ def load_cache():
     """Nạp cache runtime (CACHE_FILE); thiếu/hỏng → fallback seed commit sẵn
     (SEED_FILE) để cold start có signal ngay; cả hai hỏng → rỗng (self-heal ở
     lần refresh sau)."""
-    global _cache
+    global _cache, _volumes
     data = _read_cache_file(CACHE_FILE) or _read_cache_file(SEED_FILE)
     if data:
         _cache = {"last_refresh": data.get("last_refresh"), "signals": data["signals"]}
+        _volumes = data.get("volumes") or {}
     else:
         _cache = {"last_refresh": None, "signals": {}}
+        _volumes = {}
     return _cache
 
 
 def _save_cache():
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_cache, f, ensure_ascii=False)
+            # volumes lưu cạnh _cache (key riêng) — _cache giữ shape cũ cho code khác.
+            json.dump({**_cache, "volumes": _volumes}, f, ensure_ascii=False)
     except OSError as e:
         logger.warning("ghi signal cache thất bại: %s", e)
 
@@ -207,10 +214,19 @@ def _refresh_one(symbol, history_fn, end):
         return "error"
     if not raw:  # []  → rỗng thật
         return "empty"
+    _record_volume(symbol, raw)  # lưu volume kể cả khi chưa có tín hiệu
     sig = latest_signal(_to_candles(raw))
     if sig is not None:
         _cache["signals"][symbol] = sig
     return "ok"
+
+
+def _record_volume(symbol, raw):
+    """Lưu khối lượng khớp của candle gần nhất (số nguyên). Bỏ qua nếu thiếu/hỏng."""
+    try:
+        _volumes[symbol] = int(float(raw[-1]["volume"]))
+    except (KeyError, IndexError, TypeError, ValueError):
+        pass
 
 
 def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep):
@@ -310,6 +326,17 @@ def attach_signals(board):
         row["signal_price"] = entry["price"] if entry else None
         row["signal_sessions"] = entry.get("sessions") if entry else None
     return board
+
+
+def volumes_snapshot():
+    """Bản sao {symbol: volume} khối lượng phiên gần nhất — cho service khác xếp hạng."""
+    return dict(_volumes)
+
+
+def signal_of(symbol):
+    """Xu hướng mua/bán gần nhất của 1 mã: "buy"/"sell"/None."""
+    entry = _cache["signals"].get(symbol)
+    return entry["signal"] if entry else None
 
 
 # ===== Lập lịch =====

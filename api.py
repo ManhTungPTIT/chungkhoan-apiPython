@@ -16,6 +16,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+import homepage_service
 import intraday_service
 import sector_service
 import signal_service
@@ -77,3 +78,17 @@ def get_sector_symbols(
 def get_heatmap():
     """Treemap bản đồ nhiệt: [{ group, icb_code, symbols:[{symbol, change_pct, market_cap}] }]."""
     return sector_service.get_heatmap()
+
+
+@app.get("/api/python/homepage/top-volume")
+def get_homepage_top_volume(
+    limit: int = Query(10, ge=1, le=100, description="Số mã top theo khối lượng, mặc định 10"),
+):
+    """Top mã VN100 theo khối lượng phiên gần nhất + xu hướng mua/bán (đọc cache)."""
+    return homepage_service.get_top_volume(limit)
+
+
+@app.get("/api/python/homepage/market-depth")
+def get_homepage_market_depth():
+    """Tổng cầu (chờ mua) / tổng cung (chờ bán) toàn thị trường — cộng 3+3 bước giá."""
+    return homepage_service.get_market_depth()

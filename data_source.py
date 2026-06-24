@@ -20,6 +20,12 @@ def _default_price_board(symbols: list[str]):
     return Trading(symbol=symbols[0], source=VCI).price_board(symbols)
 
 
+def _default_all_listing():
+    from vnstock import Listing
+
+    return Listing(source=VCI).all_symbols()["symbol"].tolist()
+
+
 def _default_history(symbol: str, start: str, end: str, interval: str = "1D"):
     from vnstock.api.quote import Quote
 
@@ -60,6 +66,58 @@ def fetch_vn100_board(
     if df is None or getattr(df, "empty", False):
         return []
     return _map_board(df)
+
+
+def fetch_all_symbols(
+    listing_fn: Callable = _default_all_listing,
+) -> Optional[list[str]]:
+    """Toàn bộ mã đang niêm yết trên thị trường. Trả None nếu lỗi (kể cả rate-limit)."""
+    try:
+        return listing_fn()
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("all_symbols thất bại: %s", _short(e))
+        return None
+
+
+def fetch_market_bid_ask(
+    symbols: list[str],
+    price_board_fn: Callable = _default_price_board,
+) -> Optional[list[dict]]:
+    """Khối lượng dư mua/dư bán mỗi mã = tổng 3 bước giá hiển thị (bid_1..3 / ask_1..3).
+
+    Dữ liệu sổ lệnh real-time (1 request price_board). Trả [{symbol, bid_volume,
+    ask_volume}]; None nếu lỗi; [] nếu rỗng."""
+    try:
+        df = price_board_fn(symbols)
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("price_board (bid/ask) thất bại: %s", _short(e))
+        return None
+
+    if df is None or getattr(df, "empty", False):
+        return []
+    return _map_bid_ask(df)
+
+
+def _map_bid_ask(df) -> list[dict]:
+    out = []
+    for _, row in df.iterrows():
+        out.append(
+            {
+                "symbol": row[("listing", "symbol")],
+                "bid_volume": sum(_num(row[("bid_ask", f"bid_{i}_volume")]) for i in (1, 2, 3)),
+                "ask_volume": sum(_num(row[("bid_ask", f"ask_{i}_volume")]) for i in (1, 2, 3)),
+            }
+        )
+    return out
+
+
+def _num(x) -> int:
+    """Ép về int; NaN/None/giá trị hỏng → 0 (mức giá trống của sổ lệnh)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0
+    return int(v) if v == v else 0  # v == v loại NaN
 
 
 def fetch_intraday_history(
