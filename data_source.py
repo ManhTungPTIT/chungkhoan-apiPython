@@ -1,5 +1,6 @@
 
 
+import datetime as dt
 import logging
 from typing import Callable, Optional
 
@@ -83,10 +84,12 @@ def fetch_market_bid_ask(
     symbols: list[str],
     price_board_fn: Callable = _default_price_board,
 ) -> Optional[list[dict]]:
-    """Khối lượng dư mua/dư bán mỗi mã = tổng 3 bước giá hiển thị (bid_1..3 / ask_1..3).
+    """Sổ lệnh mỗi mã (real-time, 1 request price_board): tổng dư mua/dư bán của 3
+    bước giá + giá cao nhất mỗi bên.
 
-    Dữ liệu sổ lệnh real-time (1 request price_board). Trả [{symbol, bid_volume,
-    ask_volume}]; None nếu lỗi; [] nếu rỗng."""
+    Trả [{symbol, bid_volume, ask_volume, max_bid_price, max_ask_price}]; None nếu
+    lỗi; [] nếu rỗng. max_bid_price = bid_1 (giá mua cao nhất, mức giảm dần);
+    max_ask_price = ask_3 (giá bán cao nhất, mức tăng dần)."""
     try:
         df = price_board_fn(symbols)
     except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
@@ -106,6 +109,8 @@ def _map_bid_ask(df) -> list[dict]:
                 "symbol": row[("listing", "symbol")],
                 "bid_volume": sum(_num(row[("bid_ask", f"bid_{i}_volume")]) for i in (1, 2, 3)),
                 "ask_volume": sum(_num(row[("bid_ask", f"ask_{i}_volume")]) for i in (1, 2, 3)),
+                "max_bid_price": _num(row[("bid_ask", "bid_1_price")]),  # giá mua cao nhất
+                "max_ask_price": _num(row[("bid_ask", "ask_3_price")]),  # giá bán cao nhất
             }
         )
     return out
@@ -139,6 +144,25 @@ def fetch_intraday_history(
     return _map_history(df)
 
 
+def fetch_prev_session_volume(
+    symbol: str,
+    history_fn: Callable = _default_history,
+    today: Optional[dt.date] = None,
+) -> Optional[int]:
+    """KL khớp của phiên hoàn tất gần nhất TRƯỚC hôm nay (nến 1D) của 1 mã/index.
+
+    Lấy ~10 ngày nến để chắc chắn vượt cuối tuần/nghỉ lễ, rồi chọn nến có ngày <
+    hôm nay gần nhất. Trả None nếu fetch lỗi; 0 nếu không có phiên trước đó."""
+    today = today or dt.date.today()
+    start = (today - dt.timedelta(days=10)).isoformat()
+    rows = fetch_intraday_history(symbol, start, today.isoformat(), "1D", history_fn)
+    if rows is None:
+        return None
+    today_str = today.isoformat()
+    prev = [r for r in rows if str(r.get("time", ""))[:10] < today_str]
+    return _num(prev[-1].get("volume")) if prev else 0
+
+
 def _map_board(df) -> list[dict]:
     out = []
     for _, row in df.iterrows():
@@ -147,7 +171,9 @@ def _map_board(df) -> list[dict]:
         change_pct = round((price - ref) / ref * 100, 2) if ref else 0.0
         # accumulated_value của price_board tính bằng TRIỆU VND → quy về VND để
         # giữ nguyên đơn vị 'value' như API cũ (volume × close).
-        value_millions = row[("match", "accumulated_value")] or 0
+        value_millions = row[("match", "accumulated_value")]
+        if not value_millions or value_millions != value_millions:  # None/0/NaN
+            value_millions = 0
         out.append(
             {
                 "symbol": row[("listing", "symbol")],

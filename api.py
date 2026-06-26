@@ -92,3 +92,9 @@ def get_homepage_top_volume(
 def get_homepage_market_depth():
     """Tổng cầu (chờ mua) / tổng cung (chờ bán) toàn thị trường — cộng 3+3 bước giá."""
     return homepage_service.get_market_depth()
+
+
+@app.get("/api/python/homepage/market-breadth")
+def get_homepage_market_breadth():
+    """Số mã tăng/giảm/đứng giá so với hôm qua (real-time) + tổng KL khớp phiên hôm qua."""
+    return homepage_service.get_market_breadth()
