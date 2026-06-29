@@ -12,6 +12,28 @@ import signal_service
 # volume = tổng KL khớp của sàn đó).
 _MARKET_INDICES = ("VNINDEX", "HNXINDEX", "UPCOMINDEX")
 
+##La ban dong tien
+def build_top_volume(volumes: dict, bid_ask: list[dict] | None, limit: int = 10) -> dict:
+    """Dựng top-volume từ dữ liệu ĐÃ có sẵn: {symbol: volume} + sổ lệnh (bid/ask).
+
+    Tách khỏi get_top_volume để market_refresher tái dùng bid/ask của market_wide
+    snapshot (đã fetch chung) — không gọi price_board lại. `bid_ask` có thể chứa
+    toàn thị trường hoặc chỉ top mã; tra theo symbol nên cả hai đều đúng.
+    """
+    rows = [
+        {"symbol": sym, "volume": vol, "trend": signal_service.signal_of(sym)}
+        for sym, vol in volumes.items()
+    ]
+    rows.sort(key=lambda r: r["volume"], reverse=True)
+    top = rows[:limit]
+
+    by_symbol = {d["symbol"]: d for d in (bid_ask or [])}
+    for row in top:
+        d = by_symbol.get(row["symbol"])
+        row["buy_value"] = d["bid_volume"] * d["max_bid_price"] if d else None
+        row["sell_value"] = d["ask_volume"] * d["max_ask_price"] if d else None
+    return {"data": top}
+
 
 def get_top_volume(limit: int = 10) -> dict:
     """Top `limit` mã theo khối lượng khớp phiên gần nhất (cache), kèm xu hướng và
@@ -24,48 +46,40 @@ def get_top_volume(limit: int = 10) -> dict:
     buy_value/sell_value = None nếu không lấy được sổ lệnh. Sắp theo volume giảm dần.
     """
     volumes = signal_service.volumes_snapshot()
-    rows = [
-        {"symbol": sym, "volume": vol, "trend": signal_service.signal_of(sym)}
-        for sym, vol in volumes.items()
+    # Chỉ cần sổ lệnh cho top mã → fetch riêng nhóm này (1 request price_board).
+    top_syms = [
+        sym for sym, _ in sorted(volumes.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     ]
-    rows.sort(key=lambda r: r["volume"], reverse=True)
-    top = rows[:limit]
+    bid_ask = data_source.fetch_market_bid_ask(top_syms) if top_syms else None
+    return build_top_volume(volumes, bid_ask, limit)
 
-    # Sổ lệnh real-time cho riêng top mã (1 request price_board).
-    depth = data_source.fetch_market_bid_ask([r["symbol"] for r in top]) if top else None
-    by_symbol = {d["symbol"]: d for d in depth} if depth else {}
-    for row in top:
-        d = by_symbol.get(row["symbol"])
-        row["buy_value"] = d["bid_volume"] * d["max_bid_price"] if d else None
-        row["sell_value"] = d["ask_volume"] * d["max_ask_price"] if d else None
-    return {"data": top}
+
+##can bang dong tien
+def build_market_depth(bid_ask: list[dict] | None) -> dict:
+    """Tổng cầu / tổng cung = cộng dư mua/dư bán (3 bước giá) từ sổ lệnh ĐÃ fetch."""
+    if not bid_ask:
+        return {"total_bid_volume": 0, "total_ask_volume": 0}
+    return {
+        "total_bid_volume": sum(r["bid_volume"] for r in bid_ask),
+        "total_ask_volume": sum(r["ask_volume"] for r in bid_ask),
+    }
 
 
 def get_market_depth() -> dict:
     """Tổng cầu / tổng cung toàn thị trường = cộng dư mua/dư bán (3 bước giá mỗi
-    bên) của mọi mã đang giao dịch. Dữ liệu sổ lệnh real-time (1 request, không
-    cache). Fetch lỗi → trả 0."""
+    bên) của mọi mã đang giao dịch. Dữ liệu sổ lệnh real-time. Fetch lỗi → trả 0."""
     symbols = data_source.fetch_all_symbols()##lay dnah sach ma
-    board = data_source.fetch_market_bid_ask(symbols) if symbols else None
-    if not board:
-        return {"total_bid_volume": 0, "total_ask_volume": 0}
-    return {
-        "total_bid_volume": sum(r["bid_volume"] for r in board),
-        "total_ask_volume": sum(r["ask_volume"] for r in board),
-    }
+    bid_ask = data_source.fetch_market_bid_ask(symbols) if symbols else None
+    return build_market_depth(bid_ask)
 
 
-def get_market_breadth() -> dict:
-    """Độ rộng thị trường (1 request price_board toàn thị trường):
-      advancers/decliners/unchanged — số mã tăng/giảm/đứng giá so với hôm qua
-        (giá khớp real-time vs giá tham chiếu).
-      total_value          — tổng GIÁ TRỊ khớp lệnh phiên ĐANG diễn ra (real-time,
-                             VND), cộng accumulated_value mọi mã.
-      prev_total_volume    — tổng KHỐI LƯỢNG khớp lệnh phiên HÔM QUA (cộng volume
-                             3 index).
-    Fetch lỗi → 0."""
-    symbols = data_source.fetch_all_symbols()
-    board = data_source.fetch_vn100_board(symbols) if symbols else None
+def build_market_breadth(board: list[dict] | None, prev_total_vol: int) -> dict:
+    """Độ rộng thị trường từ board ĐÃ fetch sẵn + KL hôm qua tính sẵn.
+
+      advancers/decliners/unchanged — số mã tăng/giảm/đứng giá so với tham chiếu.
+      total_value       — tổng GIÁ TRỊ khớp lệnh phiên ĐANG diễn ra (real-time, VND).
+      prev_total_volume — tổng KHỐI LƯỢNG khớp phiên HÔM QUA (cộng volume 3 index).
+    """
     advancers = decliners = unchanged = 0
     total_value = 0
     for row in board or []:
@@ -83,11 +97,18 @@ def get_market_breadth() -> dict:
         "decliners": decliners,
         "unchanged": unchanged,
         "total_value": total_value,
-        "prev_total_volume": _prev_total_volume(),
+        "prev_total_volume": prev_total_vol,
     }
 
 
-def _prev_total_volume() -> int:
+def get_market_breadth() -> dict:
+    """Độ rộng thị trường (1 request price_board toàn thị trường). Fetch lỗi → 0."""
+    symbols = data_source.fetch_all_symbols()
+    board = data_source.fetch_vn100_board(symbols) if symbols else None
+    return build_market_breadth(board, prev_total_volume())
+
+
+def prev_total_volume() -> int:
     """Tổng KL khớp phiên hôm qua của cả thị trường = cộng volume 3 index. Bỏ qua
     index nào fetch lỗi (None)."""
     total = 0

@@ -101,6 +101,30 @@ def fetch_market_bid_ask(
     return _map_bid_ask(df)
 
 
+def fetch_market_snapshot(
+    symbols: list[str],
+    price_board_fn: Callable = _default_price_board,
+) -> Optional[dict]:
+    """1 request price_board → map ra CẢ board (match) lẫn sổ lệnh (bid/ask).
+
+    Cùng một DataFrame price_board chứa đủ cột cho `_map_board` (giá/khối lượng/
+    giá trị) và `_map_bid_ask` (dư mua/bán), nên gọi 1 lần rồi map 2 chiều thay vì
+    2 request riêng — phục vụ market-breadth + market-depth + top-volume chung.
+
+    Trả {"board": [...], "bid_ask": [...]}; None nếu lỗi (kể cả rate-limit);
+    {"board": [], "bid_ask": []} nếu rỗng.
+    """
+    try:
+        df = price_board_fn(symbols)
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("price_board (snapshot) thất bại: %s", _short(e))
+        return None
+
+    if df is None or getattr(df, "empty", False):
+        return {"board": [], "bid_ask": []}
+    return {"board": _map_board(df), "bid_ask": _map_bid_ask(df)}
+
+
 def _map_bid_ask(df) -> list[dict]:
     out = []
     for _, row in df.iterrows():

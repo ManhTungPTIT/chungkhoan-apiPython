@@ -47,18 +47,26 @@ def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
     return [x["symbol"] for x in _process(board)]
 
 
-def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
-    """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu.
+def build_board(board: list[dict]) -> dict:
+    """Dựng payload /vn100 từ board ĐÃ fetch sẵn: lọc value + sort + gắn tín hiệu.
 
-    Tín hiệu mua/bán (field `signal`) lấy từ cache của signal_service (tính nền,
-    1 lần/phiên) — import trễ để tránh vòng lặp import (signal_service cần vn100_service).
+    Tách khỏi get_board để market_refresher fetch board 1 lần rồi tái dùng cho
+    nhiều view (vn100/sectors/heatmap) — không gọi price_board lại.
+
+    Tín hiệu mua/bán (field `signal`) lấy từ cache signal_service (tính nền 1 lần/
+    phiên) — import trễ để tránh vòng lặp import (signal_service cần vn100_service).
     """
+    import signal_service
+
+    return {"data": signal_service.attach_signals(_process(board))}
+
+
+def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
+    """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu."""
     symbols = get_symbols()
     if not symbols:
         return {"data": []}
     board = fetch_fn(symbols)
     if board is None:
         return {"data": []}
-    import signal_service
-
-    return {"data": signal_service.attach_signals(_process(board))}
+    return build_board(board)

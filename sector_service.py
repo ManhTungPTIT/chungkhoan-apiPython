@@ -52,51 +52,33 @@ def _build_groups(board: list[dict], imap: dict) -> list[dict]:
     return sorted(groups.values(), key=lambda g: g["total_value"], reverse=True)
 
 
-def _groups(board_fn, industry_fn) -> list[dict]:
-    """Lấy board VN100 + bản đồ ngành rồi dựng cấu trúc nhóm đầy đủ."""
-    symbols = vn100_service.get_symbols()
-    if not symbols:
-        return []
-    board = board_fn(symbols)
-    if board is None:
-        return []
+def build_groups(
+    board: list[dict],
+    industry_fn=data_source.fetch_industry_map,
+) -> list[dict]:
+    """Dựng cấu trúc nhóm ngành từ board ĐÃ fetch sẵn (bản đồ ngành memoize).
+
+    Tách khỏi _groups để market_refresher fetch board 1 lần rồi dựng cả 3 view
+    (sectors/heatmap/sector_symbols) — không gọi price_board lại.
+    """
     return _build_groups(board, get_industry_map(industry_fn))
 
 
-def get_sectors(
-    board_fn=data_source.fetch_vn100_board,
-    industry_fn=data_source.fetch_industry_map,
-) -> dict:
-    """Danh sách nhóm ngành (nhẹ): tên, mã ICB, tổng value, số mã."""
-    data = [
+def sectors_view(groups: list[dict]) -> list[dict]:
+    """View danh sách nhóm ngành (nhẹ): tên, mã ICB, tổng value, số mã."""
+    return [
         {
             "group": g["group"],
             "icb_code": g["icb_code"],
             "total_value": g["total_value"],
             "symbol_count": len(g["symbols"]),
         }
-        for g in _groups(board_fn, industry_fn)
+        for g in groups
     ]
-    return  data
 
 
-def get_sector_symbols(
-    icb_code: str,
-    board_fn=data_source.fetch_vn100_board,
-    industry_fn=data_source.fetch_industry_map,
-) -> dict:
-    """Các mã + OHLC phiên hôm nay của nhóm ICB cấp 3 trùng icb_code."""
-    for g in _groups(board_fn, industry_fn):
-        if g["icb_code"] == icb_code:
-            return {"group": g["group"], "icb_code": icb_code, "data": g["symbols"]}
-    return {"group": None, "icb_code": icb_code, "data": []}
-
-
-def get_heatmap(
-    board_fn=data_source.fetch_vn100_board,
-    industry_fn=data_source.fetch_industry_map,
-) -> list[dict]:
-    """Cấu trúc cho treemap bản đồ nhiệt: ngành → mã (symbol, change_pct, market_cap).
+def heatmap_view(groups: list[dict]) -> list[dict]:
+    """View treemap bản đồ nhiệt: ngành → mã (symbol, change_pct, market_cap).
 
     market_cap tạm dùng 'value' (giá trị giao dịch lũy kế) làm đại lượng kích
     thước ô — đổi sang vốn hóa thật khi nguồn dữ liệu có số cổ phiếu lưu hành.
@@ -114,5 +96,49 @@ def get_heatmap(
                 for s in g["symbols"]
             ],
         }
-        for g in _groups(board_fn, industry_fn)
+        for g in groups
     ]
+
+
+def sector_symbols_view(groups: list[dict], icb_code: str) -> dict:
+    """View các mã + OHLC phiên hôm nay của nhóm ICB cấp 3 trùng icb_code."""
+    for g in groups:
+        if g["icb_code"] == icb_code:
+            return {"group": g["group"], "icb_code": icb_code, "data": g["symbols"]}
+    return {"group": None, "icb_code": icb_code, "data": []}
+
+
+def _groups(board_fn, industry_fn) -> list[dict]:
+    """Lấy board VN100 + bản đồ ngành rồi dựng cấu trúc nhóm đầy đủ."""
+    symbols = vn100_service.get_symbols()
+    if not symbols:
+        return []
+    board = board_fn(symbols)
+    if board is None:
+        return []
+    return _build_groups(board, get_industry_map(industry_fn))
+
+
+def get_sectors(
+    board_fn=data_source.fetch_vn100_board,
+    industry_fn=data_source.fetch_industry_map,
+) -> dict:
+    """Danh sách nhóm ngành (nhẹ): tên, mã ICB, tổng value, số mã."""
+    return sectors_view(_groups(board_fn, industry_fn))
+
+
+def get_sector_symbols(
+    icb_code: str,
+    board_fn=data_source.fetch_vn100_board,
+    industry_fn=data_source.fetch_industry_map,
+) -> dict:
+    """Các mã + OHLC phiên hôm nay của nhóm ICB cấp 3 trùng icb_code."""
+    return sector_symbols_view(_groups(board_fn, industry_fn), icb_code)
+
+
+def get_heatmap(
+    board_fn=data_source.fetch_vn100_board,
+    industry_fn=data_source.fetch_industry_map,
+) -> list[dict]:
+    """Cấu trúc cho treemap bản đồ nhiệt: ngành → mã (symbol, change_pct, market_cap)."""
+    return heatmap_view(_groups(board_fn, industry_fn))
