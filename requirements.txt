@@ -1,4 +1,6 @@
-git+https://github.com/thinh-vu/vnstock.git@main
+# Pin bản cụ thể: @main không pin khiến prod kéo bản khác local → đổi shape
+# symbols_by_industries làm hỏng heatmap/sectors. 4.0.4 là bản đã verify.
+vnstock==4.0.4
 fastapi
 uvicorn[standard]
 

@@ -108,15 +108,27 @@ def warm_intraday():
         market_cache.get_intraday(symbol, interval)
 
 
+def _run_step(step):
+    """Chạy 1 bước refresh, nuốt mọi lỗi (chỉ log) để 1 bước hỏng không kéo theo
+    các bước còn lại và không giết scheduler_loop."""
+    try:
+        step()
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("refresh step %s thất bại: %s", step.__name__, e)
+
+
 def refresh_all():
-    """Một lượt refresh đầy đủ. Khóa chống chạy chồng (giống signal_service)."""
+    """Một lượt refresh đầy đủ. Khóa chống chạy chồng (giống signal_service).
+
+    Mỗi bước cô lập: board_vn100 lỗi vẫn KHÔNG chặn market_wide / warm_intraday,
+    và không làm văng lỗi ra scheduler_loop (tránh chết luồng nền vĩnh viễn)."""
     if not _refresh_lock.acquire(blocking=False):
         logger.info("market refresh đang chạy — bỏ qua lần gọi chồng")
         return
     try:
-        refresh_board_vn100()
-        refresh_market_wide()
-        warm_intraday()
+        _run_step(refresh_board_vn100)
+        _run_step(refresh_market_wide)
+        _run_step(warm_intraday)
     finally:
         _refresh_lock.release()
 

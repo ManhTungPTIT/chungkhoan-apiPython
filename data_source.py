@@ -220,17 +220,24 @@ def fetch_industry_map(
     """Bản đồ mã → nhóm ngành ICB cấp 3. Trả None nếu lỗi (kể cả rate-limit)."""
     try:
         df = industries_fn()
+        if df is None or getattr(df, "empty", False):
+            return {}
+        return _map_industries(df)
     except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        # Bao trùm cả _map_industries: bản vnstock đổi shape (đổi tên/thiếu cột) →
+        # trả None như mọi fetch lỗi khác để KHÔNG làm chết market_refresher hay
+        # ném 500 ở endpoint heatmap/sectors; get_industry_map sẽ thử lại sau.
         logger.warning("symbols_by_industries thất bại: %s", _short(e))
         return None
 
-    if df is None or getattr(df, "empty", False):
-        return {}
-    return _map_industries(df)
-
 
 def _map_industries(df) -> dict:
-    lvl3 = df[df["icb_level"] == 3]
+    # icb_level có thể là số HOẶC chuỗi tùy phiên bản vnstock → ép về số trước khi
+    # lọc cấp 3, tránh lọc rỗng âm thầm (mọi mã thành "Chưa phân loại").
+    import pandas as pd
+
+    level = pd.to_numeric(df["icb_level"], errors="coerce")
+    lvl3 = df[level == 3]
     out = {}
     for _, row in lvl3.iterrows():
         out[row["symbol"]] = {
