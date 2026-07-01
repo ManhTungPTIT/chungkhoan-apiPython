@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import data_source
 import vn100_service
@@ -44,8 +44,11 @@ SEED_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.seed.json")
 # throttle phải ≥1.0s (≤60/phút); 1.1s (~54/phút) để có biên an toàn — nếu nhanh
 # hơn, một phần mã bị rate-limit mỗi lần refresh. ~100 mã ≈ 110s/lần.
 THROTTLE_S = 1.1
-REFRESH_HOUR = 15  # ~15:05 giờ VN, sau khi phiên đóng cửa
-REFRESH_MINUTE = 5
+# Các mốc tính lại trong ngày (giờ VN):
+#   07:00 — trước giờ mở cửa, chốt lại tín hiệu trên nến ngày ĐÃ đóng của phiên
+#           trước (bù nếu lần 15:05 hôm trước lỗi hoặc server tắt qua đêm).
+#   15:05 — sau khi phiên đóng cửa, cập nhật tín hiệu theo nến vừa hoàn tất.
+REFRESH_TIMES = ((7, 0), (15, 5))
 
 # Retry vòng 2 cho mã fetch lỗi (thường do rate-limit) — backoff luỹ thừa.
 RETRY_COOLDOWN_S = 60  # nghỉ 1 lần giữa vòng 1 và vòng 2 cho rate-limit hồi
@@ -63,6 +66,11 @@ _cache = {"last_refresh": None, "signals": {}}
 # chưa có tín hiệu) — phục vụ homepage_service xếp hạng top volume. Lưu kèm cache
 # file dưới key "volumes" để restart không phải đợi refresh.
 _volumes: dict[str, int] = {}
+# Nến lịch sử {symbol: [candle,...]} tới phiên đã refresh (nến ngày đã đóng). Chỉ
+# giữ trong RAM (không lưu file — quá lớn), phục vụ tính tín hiệu LIVE trong phiên:
+# ghép nến hôm nay (giá real-time từ price_board) vào base rồi tính lại. Trống sau
+# restart tới lần refresh ngày kế → attach_signals fallback về _cache["signals"].
+_history_candles: dict[str, list] = {}
 # Hàng đợi mã còn fetch lỗi cần retry mỗi phút (xem _drain_pending).
 _pending: list[str] = []
 _refresh_lock = threading.Lock()
@@ -134,14 +142,40 @@ def compute_signals(candles):
 
 
 def latest_signal(candles):
-    """Tín hiệu gần nhất kèm `sessions` = số phiên từ nến tín hiệu tới nến cuối
-    (0 = đổi ngay ở phiên gần nhất). None nếu chưa đủ dữ liệu / chưa có tín hiệu."""
+    """Tín hiệu gần nhất {signal, date, price}. None nếu chưa đủ dữ liệu / chưa có
+    tín hiệu. Số phiên kể từ ngày báo (T+) KHÔNG lưu ở đây mà tính động lúc hiển
+    thị trong attach_signals (xem _trading_sessions_since) để luôn đúng theo hôm nay,
+    không bị đóng băng theo nến cuối lúc refresh."""
     sigs = compute_signals(candles)
     if not sigs:
         return None
-    last = sigs[-1]
-    idx = next(i for i, c in enumerate(candles) if str(c["time"]) == last["date"])
-    return {**last, "sessions": (len(candles) - 1) - idx}
+    return sigs[-1]
+
+
+def _trading_sessions_since(signal_date, now=None):
+    """Số phiên giao dịch (T2–T6) đã trôi từ ngày báo tới hôm nay (giờ VN).
+
+    Đếm số ngày thường trong khoảng [ngày báo, hôm nay) — báo hôm qua (ngày thường)
+    → 1, báo thứ Sáu xem thứ Hai → 1, báo hôm nay / ngày báo ở tương lai → 0. Ngày
+    báo không hợp lệ / rỗng → None. (Chưa trừ ngày nghỉ lễ — hiếm, chấp nhận sai số
+    nhỏ quanh lễ.)"""
+    if not signal_date:
+        return None
+    try:
+        start = date.fromisoformat(str(signal_date)[:10])
+    except ValueError:
+        return None
+    today = (now or datetime.now(VN_TZ)).date()
+    if start >= today:
+        return 0
+    days = (today - start).days
+    weeks, extra = divmod(days, 7)
+    count = weeks * 5
+    weekday = start.weekday()  # 0=T2 … 6=CN
+    for i in range(extra):
+        if (weekday + i) % 7 < 5:
+            count += 1
+    return count
 
 
 def _to_candles(raw):
@@ -215,7 +249,9 @@ def _refresh_one(symbol, history_fn, end):
     if not raw:  # []  → rỗng thật
         return "empty"
     _record_volume(symbol, raw)  # lưu volume kể cả khi chưa có tín hiệu
-    sig = latest_signal(_to_candles(raw))
+    candles = _to_candles(raw)
+    _history_candles[symbol] = candles  # base cho tính live trong phiên
+    sig = latest_signal(candles)
     if sig is not None:
         _cache["signals"][symbol] = sig
     return "ok"
@@ -242,8 +278,10 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
     try:
         history_fn = history_fn or data_source.fetch_intraday_history
         # Chỉ tính tín hiệu cho mã value > ngưỡng (cùng tập với bảng hiển thị),
-        # không quét toàn nhóm VN100.
-        symbols = vn100_service.get_active_symbols()
+        # không quét toàn nhóm VN100. Lúc thị trường đóng (vd lịch 07:00 hoặc boot
+        # trước giờ mở cửa) mọi mã có value phiên hôm nay = 0 → active rỗng; fallback
+        # nguyên nhóm VN100 để vẫn tính được trên nến ngày đã đóng (không thành no-op).
+        symbols = vn100_service.get_active_symbols() or vn100_service.get_symbols()
         if not symbols:
             return _cache
         end = datetime.now(VN_TZ).strftime("%Y-%m-%d")
@@ -310,21 +348,73 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
         _refresh_lock.release()
 
 
-def attach_signals(board):
+# price_board (row board) trả giá VND thô (vd 62900), còn nến lịch sử (history)
+# theo NGHÌN đồng (vd 62.9) → phải chia để đưa OHLC board về cùng đơn vị nến base
+# trước khi ghép. Bỏ bước này → nến hôm nay vọt 1000× → close >> EMA20 → BÁO MUA
+# GIẢ hàng loạt. (FE cũng /1000 khi hiển thị giá — xem filterStock.jsx.)
+PRICE_BOARD_SCALE = 1000
+
+
+def _live_candle(row, today):
+    """Nến hôm nay từ 1 row board (giá real-time), quy về đơn vị nghìn đồng như nến
+    lịch sử. None nếu thiếu OHLC (vd row test tối giản chỉ có price) → khỏi ghép,
+    dùng tín hiệu cache."""
+    try:
+        return {
+            "time": today,
+            "high": float(row["high"]) / PRICE_BOARD_SCALE,
+            "low": float(row["low"]) / PRICE_BOARD_SCALE,
+            "close": float(row["close"]) / PRICE_BOARD_SCALE,
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _merge_today(base, live):
+    """Ghép nến hôm nay vào base: cùng ngày với nến cuối → thay thế (nến đang cập
+    nhật); ngày mới → nối thêm. Không sửa base gốc."""
+    if base and str(base[-1]["time"])[:10] == str(live["time"])[:10]:
+        return base[:-1] + [live]
+    return base + [live]
+
+
+def _live_signal(symbol, row, today):
+    """Tín hiệu tính LIVE: ghép nến hôm nay của `row` vào base candles rồi tính lại.
+
+    Thiếu base (chưa refresh/khởi động lại) hoặc row thiếu OHLC → None để caller
+    fallback về tín hiệu đã cache (_cache["signals"])."""
+    base = _history_candles.get(symbol)
+    live = _live_candle(row, today)
+    if not base or live is None:
+        return None
+    return latest_signal(_merge_today(base, live))
+
+
+def attach_signals(board, now=None):
     """Gắn tín hiệu gần nhất vào mỗi row board theo symbol:
       signal          — "buy"/"sell"/None
       signal_date     — ngày phát tín hiệu (None nếu chưa có)
       signal_price    — giá tại điểm tín hiệu (None nếu chưa có)
-      signal_sessions — số phiên từ điểm tín hiệu tới phiên gần nhất (0 = đổi hôm nay)
-    Dùng key có tiền tố `signal_` để không đè `price`/giá hiện tại của board.
-    `.get("sessions")` để tương thích cache/seed cũ chưa có field này (→ None)."""
+      signal_sessions — số phiên giao dịch từ ngày báo tới HÔM NAY (0 = báo hôm nay,
+                        None nếu chưa có tín hiệu) — tính động theo _trading_sessions_since
+                        để luôn đúng theo ngày hiện tại, không đóng băng theo nến cuối.
+
+    Ưu tiên tín hiệu LIVE: ghép giá hôm nay (OHLC real-time trong row) vào base nến
+    lịch sử rồi tính lại → tín hiệu cắt trong phiên hiện ngay, không phải đợi 15:05.
+    Không tính được live (thiếu base/OHLC) → fallback tín hiệu cache _cache["signals"].
+    Dùng key có tiền tố `signal_` để không đè `price`/giá hiện tại của board. `now`
+    cho test bơm ngày cố định; mặc định lấy ngày hiện tại (giờ VN)."""
+    today = (now or datetime.now(VN_TZ)).date().isoformat()
     sigs = _cache["signals"]
     for row in board:
-        entry = sigs.get(row.get("symbol"))
+        symbol = row.get("symbol")
+        entry = _live_signal(symbol, row, today) or sigs.get(symbol)
         row["signal"] = entry["signal"] if entry else None
         row["signal_date"] = entry["date"] if entry else None
         row["signal_price"] = entry["price"] if entry else None
-        row["signal_sessions"] = entry.get("sessions") if entry else None
+        row["signal_sessions"] = (
+            _trading_sessions_since(entry["date"], now) if entry else None
+        )
     return board
 
 
@@ -342,14 +432,16 @@ def signal_of(symbol):
 # ===== Lập lịch =====
 
 def _seconds_until_next_refresh(now=None):
-    """Số giây tới mốc ~15:05 giờ VN kế tiếp (cuộn sang hôm sau nếu đã qua)."""
+    """Số giây tới mốc refresh GẦN NHẤT sắp tới trong REFRESH_TIMES (giờ VN); mốc
+    nào đã qua trong hôm nay thì cuộn sang hôm sau."""
     now = now or datetime.now(VN_TZ)
-    target = now.replace(
-        hour=REFRESH_HOUR, minute=REFRESH_MINUTE, second=0, microsecond=0
-    )
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+    targets = []
+    for hour, minute in REFRESH_TIMES:
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        targets.append(target)
+    return (min(targets) - now).total_seconds()
 
 
 async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
@@ -361,9 +453,15 @@ async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
 
 
 async def scheduler_loop():
-    """Warm nếu cache cũ, sau đó refresh 1 lần/ngày sau đóng cửa. Sau mỗi refresh,
-    vét nốt mã còn rate-limit mỗi phút (_drain_pending). Chạy qua to_thread để không
-    chặn event loop (vnstock là call đồng bộ)."""
+    """Warm khi cache cũ (khác hôm nay), sau đó refresh theo REFRESH_TIMES. Sau mỗi
+    refresh vét nốt mã còn rate-limit mỗi phút (_drain_pending). Chạy qua to_thread
+    để không chặn event loop (vnstock là call đồng bộ).
+
+    KHÔNG ép refresh chỉ vì `_history_candles` (base nến live) rỗng: base chỉ ở RAM
+    nên sau restart giữa phiên nó rỗng, nhưng ép refresh mỗi lần khởi động = fetch
+    lại ~100 mã → dễ đụng rate-limit khi restart lặp. Chấp nhận: sau restart giữa
+    phiên, tín hiệu live tạm ngưng, fallback về tín hiệu cache (vẫn đúng theo nến
+    ngày) tới lượt refresh kế (15:05). Lịch 07:00/boot-ngày-mới vẫn nạp lại base."""
     today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
     if _cache.get("last_refresh") != today:
         await asyncio.to_thread(refresh_signals)

@@ -7,6 +7,9 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 VCI = "VCI"
+# Giờ VN (UTC+7) — dùng khi cần "hôm nay" theo lịch giao dịch, không phụ thuộc
+# múi giờ của máy chủ (đồng bộ với signal_service/market_refresher).
+VN_TZ = dt.timezone(dt.timedelta(hours=7))
 
 
 def _default_listing():
@@ -176,8 +179,12 @@ def fetch_prev_session_volume(
     """KL khớp của phiên hoàn tất gần nhất TRƯỚC hôm nay (nến 1D) của 1 mã/index.
 
     Lấy ~10 ngày nến để chắc chắn vượt cuối tuần/nghỉ lễ, rồi chọn nến có ngày <
-    hôm nay gần nhất. Trả None nếu fetch lỗi; 0 nếu không có phiên trước đó."""
-    today = today or dt.date.today()
+    hôm nay gần nhất. Trả None nếu fetch lỗi; 0 nếu không có phiên trước đó.
+
+    "hôm nay" mặc định theo giờ VN (không dùng dt.date.today() của máy chủ) — nếu
+    server chạy UTC, khoảng 00:00–07:00 giờ VN local date còn ở ngày hôm trước sẽ
+    khiến chọn nhầm phiên (lùi thêm 1 ngày)."""
+    today = today or dt.datetime.now(VN_TZ).date()
     start = (today - dt.timedelta(days=10)).isoformat()
     rows = fetch_intraday_history(symbol, start, today.isoformat(), "1D", history_fn)
     if rows is None:

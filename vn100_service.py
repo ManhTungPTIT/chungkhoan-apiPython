@@ -14,7 +14,9 @@ _symbols: list[str] = []
 
 def _process(board: list[dict]) -> list[dict]:
     """Lọc giá trị giao dịch > 5 tỷ, sắp theo value giảm dần."""
+   
     filtered = [x for x in board if (x.get("value") or 0) > VALUE_THRESHOLD]
+    
     return sorted(filtered, key=lambda x: x["value"] or 0, reverse=True)
 
 
