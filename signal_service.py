@@ -71,6 +71,15 @@ RETRY_MAX_BACKOFF_S = 30  # trần delay
 # fetch được, thay vì phải đợi lịch ~15:05 hôm sau.
 RETRY_INTERVAL_S = 60
 
+# Số lần cho phép 1 mã ĐANG pending trả rỗng ([]) trước khi thôi retry. Rate-limit
+# đôi khi khiến vnstock trả DataFrame RỖNG thay vì ném lỗi (→ "empty" chứ không
+# phải "error"); nếu bỏ ngay ở lần rỗng đầu thì một mã có dữ liệu thật (vd DL1) bị
+# loại tới tận refresh hôm sau. Cho retry vài lần: rỗng-tạm sẽ hồi, rỗng-thật
+# (mã hủy niêm yết) chỉ tốn thêm ≤N fetch rồi thôi.
+MAX_EMPTY_RETRIES = 3
+# {symbol: số lần trả rỗng liên tiếp khi đang pending}
+_empty_counts: dict[str, int] = {}
+
 # Tỷ lệ mã active tối thiểu phải đã từng fetch (có mặt trong _volumes). Dưới mức
 # này coi như rổ vừa đổi/mở rộng (nhiều mã mới chưa tính) → warm bù ngay lúc khởi
 # động dù đã refresh trong ngày, thay vì đợi mốc 07:00/15:05 kế tiếp.
@@ -338,10 +347,11 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
 def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep):
     """Một lượt retry các mã đang fetch lỗi còn sót (_pending) do rate-limit.
 
-    Mã nào fetch được (ok/empty) → coi như xong, loại khỏi _pending (và cập nhật
-    tín hiệu vào cache nếu có); mã vẫn lỗi → giữ lại cho lượt sau. Trả _pending
-    còn lại ([] nghĩa là đã đủ). Dùng chung _refresh_lock để không chạy chồng với
-    refresh ngày."""
+    Mã fetch được (ok) → loại khỏi _pending (cập nhật tín hiệu nếu có); mã lỗi
+    (error) → giữ lại lượt sau; mã trả rỗng (empty) → giữ lại có giới hạn
+    (MAX_EMPTY_RETRIES) vì rỗng có thể do rate-limit tạm, quá ngưỡng mới bỏ. Trả
+    _pending còn lại ([] nghĩa là đã đủ). Dùng chung _refresh_lock để không chạy
+    chồng với refresh ngày."""
     global _pending
     if not _refresh_lock.acquire(blocking=False):
         return _pending
@@ -353,8 +363,17 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
         end = datetime.now(VN_TZ).strftime("%Y-%m-%d")
         remaining = []
         for idx, symbol in enumerate(pending):
-            if _refresh_one(symbol, history_fn, end) == "error":
+            outcome = _refresh_one(symbol, history_fn, end)
+            if outcome == "error":
                 remaining.append(symbol)
+            elif outcome == "empty":
+                _empty_counts[symbol] = _empty_counts.get(symbol, 0) + 1
+                if _empty_counts[symbol] < MAX_EMPTY_RETRIES:
+                    remaining.append(symbol)  # rỗng-tạm (rate-limit) → thử lại
+                else:
+                    _empty_counts.pop(symbol, None)  # rỗng-thật → thôi, dọn đếm
+            else:  # ok
+                _empty_counts.pop(symbol, None)
             if throttle_s and idx < len(pending) - 1:
                 sleep_fn(throttle_s)
         _pending = remaining
