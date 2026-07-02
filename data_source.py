@@ -15,7 +15,9 @@ VN_TZ = dt.timezone(dt.timedelta(hours=7))
 def _default_listing():
     from vnstock import Listing
 
-    return Listing().symbols_by_group("VN100").tolist()
+    # VNALL = chỉ số VNAllShare (VN100 + VNSmallCap) — đúng 300 mã. HOSE không
+    # có chỉ số "VN300" chính thức; VNALL là rổ 300 mã tương đương.
+    return Listing().symbols_by_group("VNALL").tolist()
 
 
 def _default_price_board(symbols: list[str]):
@@ -48,11 +50,13 @@ def _default_industries():
 def fetch_vn100_symbols(
     listing_fn: Callable = _default_listing,
 ) -> Optional[list[str]]:
-    """Lấy danh sách mã nhóm VN100. Trả None nếu lỗi (kể cả rate-limit)."""
+    """Lấy danh sách mã rổ VNALL (300 mã). Trả None nếu lỗi (kể cả rate-limit).
+
+    Tên hàm giữ `vn100` cho tương thích với callers/endpoint hiện có."""
     try:
         return listing_fn()
     except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
-        logger.warning("listing VN100 thất bại: %s", _short(e))
+        logger.warning("listing VNALL thất bại: %s", _short(e))
         return None
 
 
