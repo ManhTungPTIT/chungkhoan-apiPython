@@ -1,7 +1,8 @@
-"""Phục vụ bảng giá rổ VNALL (300 mã) — gọi vnstock trực tiếp, không cache.
+"""Phục vụ bảng giá rổ VNALL + toàn sàn HNX (~593 mã) — gọi vnstock trực tiếp,
+không cache.
 
 Tên module/endpoint giữ `vn100` cho tương thích (trước đây rổ VN100); nội dung
-đã mở rộng lên VNALL. Danh sách mã thay đổi rất hiếm (~mỗi quý) nên được
+đã mở rộng lên VNALL + HNX. Danh sách mã thay đổi rất hiếm (~mỗi quý) nên được
 memoize ở biến module-level: lấy 1 lần rồi giữ trong RAM. Mỗi lần lấy bảng giá
 là 1 request `price_board` cho toàn bộ mã. Fetch hỏng (rate-limit/mạng) → trả
 {data: []}.
@@ -23,7 +24,7 @@ def _process(board: list[dict]) -> list[dict]:
 
 
 def get_symbols(fetch_fn=data_source.fetch_vn100_symbols) -> list[str]:
-    """Lấy danh sách mã rổ VNALL (300 mã) 1 lần rồi memoize.
+    """Lấy danh sách mã rổ VNALL + HNX (~593 mã) 1 lần rồi memoize.
 
     Fetch hỏng (trả None) → giữ rỗng để lần gọi sau thử lại (self-heal).
     """
