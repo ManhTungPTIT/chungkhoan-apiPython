@@ -26,6 +26,17 @@ logger = logging.getLogger(__name__)
 VN_TZ = timezone(timedelta(hours=7))
 HISTORY_START = "2025-01-01"
 
+# Giờ giao dịch VN (T2–T6, 09:00–15:00). Các mốc refresh gốc (07:00/15:05) cố ý
+# nằm NGOÀI khoảng này để fetch tín hiệu nặng (~1 mã/1.1s) không đụng vòng real-
+# time 20s của market_refresher — chồng nhau sẽ vượt 60 req/phút → rate-limit.
+MARKET_OPEN_HOUR = 9
+MARKET_CLOSE_HOUR = 15
+
+
+def _is_market_hours(now=None):
+    now = now or datetime.now(VN_TZ)
+    return now.weekday() < 5 and MARKET_OPEN_HOUR <= now.hour < MARKET_CLOSE_HOUR
+
 
 def _resolve_cache_file():
     """Đường dẫn cache runtime. Cho phép trỏ sang volume bền qua env
@@ -59,6 +70,11 @@ RETRY_MAX_BACKOFF_S = 30  # trần delay
 # Mã fetch lỗi cả 2 vòng (rate-limit dai dẳng) được retry nền mỗi phút tới khi
 # fetch được, thay vì phải đợi lịch ~15:05 hôm sau.
 RETRY_INTERVAL_S = 60
+
+# Tỷ lệ mã active tối thiểu phải đã từng fetch (có mặt trong _volumes). Dưới mức
+# này coi như rổ vừa đổi/mở rộng (nhiều mã mới chưa tính) → warm bù ngay lúc khởi
+# động dù đã refresh trong ngày, thay vì đợi mốc 07:00/15:05 kế tiếp.
+COVERAGE_MIN_RATIO = 0.9
 
 # Cache nội bộ: {"last_refresh": "YYYY-MM-DD", "signals": {symbol: {signal, date, price}}}
 _cache = {"last_refresh": None, "signals": {}}
@@ -452,18 +468,41 @@ async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
         await asyncio.to_thread(retry_pending_once)
 
 
+def _coverage_gap(active_fn=None):
+    """True nếu rổ active có tỷ lệ lớn mã CHƯA từng fetch (vắng trong _volumes) —
+    dấu hiệu rổ vừa đổi/mở rộng, cache cũ chưa phủ mã mới.
+
+    Dùng _volumes (chứ không phải _cache["signals"]) làm mốc phủ: _volumes lưu MỌI
+    mã đã fetch được, kể cả mã tính ra chưa có tín hiệu — nên không báo "gap" giả
+    cho mã đã tính nhưng chưa có tín hiệu. Active rỗng (ngoài phiên/fetch lỗi) →
+    False: không ép warm, mốc lịch sẽ lo (tránh fetch lặp khi restart ngoài giờ)."""
+    active_fn = active_fn or vn100_service.get_active_symbols
+    active = active_fn()
+    if not active:
+        return False
+    covered = sum(1 for s in active if s in _volumes)
+    return covered < len(active) * COVERAGE_MIN_RATIO
+
+
 async def scheduler_loop():
-    """Warm khi cache cũ (khác hôm nay), sau đó refresh theo REFRESH_TIMES. Sau mỗi
-    refresh vét nốt mã còn rate-limit mỗi phút (_drain_pending). Chạy qua to_thread
-    để không chặn event loop (vnstock là call đồng bộ).
+    """Warm khi cache cũ (khác hôm nay) HOẶC rổ active có nhiều mã chưa phủ
+    (_coverage_gap — vd vừa đổi/mở rộng rổ), sau đó refresh theo REFRESH_TIMES. Sau
+    mỗi refresh vét nốt mã còn rate-limit mỗi phút (_drain_pending). Chạy qua
+    to_thread để không chặn event loop (vnstock là call đồng bộ).
 
     KHÔNG ép refresh chỉ vì `_history_candles` (base nến live) rỗng: base chỉ ở RAM
     nên sau restart giữa phiên nó rỗng, nhưng ép refresh mỗi lần khởi động = fetch
     lại ~100 mã → dễ đụng rate-limit khi restart lặp. Chấp nhận: sau restart giữa
     phiên, tín hiệu live tạm ngưng, fallback về tín hiệu cache (vẫn đúng theo nến
-    ngày) tới lượt refresh kế (15:05). Lịch 07:00/boot-ngày-mới vẫn nạp lại base."""
+    ngày) tới lượt refresh kế (15:05). Lịch 07:00/boot-ngày-mới vẫn nạp lại base.
+
+    Warm-on-gap KHÔNG gây fetch lặp khi restart: sau 1 lần warm, _volumes (lưu ra
+    file) đã phủ rổ → lần khởi động sau không còn gap. Chỉ warm-on-gap NGOÀI giờ
+    giao dịch: giữa phiên để mốc 15:05 lo, tránh chồng vòng real-time của
+    market_refresher (cùng nã vnstock → rate-limit, nghẽn server)."""
     today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
-    if _cache.get("last_refresh") != today:
+    stale = _cache.get("last_refresh") != today
+    if stale or (_coverage_gap() and not _is_market_hours()):
         await asyncio.to_thread(refresh_signals)
     await _drain_pending()
     while True:
