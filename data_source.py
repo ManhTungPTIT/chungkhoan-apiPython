@@ -207,9 +207,13 @@ def fetch_prev_session_volume(
 def _map_board(df) -> list[dict]:
     out = []
     for _, row in df.iterrows():
-        ref = row[("listing", "ref_price")] or 0
-        price = row[("match", "match_price")]
-        change_pct = round((price - ref) / ref * 100, 2) if ref else 0.0
+        # Mã chưa khớp lệnh (nhất là mã HNX/HOSE thanh khoản thấp) trả OHLC = NaN.
+        # Ép qua _num (NaN/None → 0) để KHÔNG lọt NaN ra JSON: Starlette serialize
+        # với allow_nan=False, một NaN là 500 cả endpoint /vn100.
+        ref = _num(row[("listing", "ref_price")])
+        price = _num(row[("match", "match_price")])
+        # price=0 (chưa khớp) → coi như đứng giá tham chiếu (0%), tránh -100% ảo.
+        change_pct = round((price - ref) / ref * 100, 2) if ref and price else 0.0
         # accumulated_value của price_board tính bằng TRIỆU VND → quy về VND để
         # giữ nguyên đơn vị 'value' như API cũ (volume × close).
         value_millions = row[("match", "accumulated_value")]
@@ -222,9 +226,9 @@ def _map_board(df) -> list[dict]:
                 "change_pct": change_pct,
                 "value": value_millions * 1_000_000,
                 # OHLC phiên hôm nay — sẵn trong price_board, dùng cho /sectors.
-                "open": row[("match", "open_price")],
-                "high": row[("match", "highest")],
-                "low": row[("match", "lowest")],
+                "open": _num(row[("match", "open_price")]),
+                "high": _num(row[("match", "highest")]),
+                "low": _num(row[("match", "lowest")]),
                 "close": price,
             }
         )
