@@ -4,13 +4,16 @@ CHỈ luồng này gọi vnstock cho dữ liệu chung → số call không ph�
 Chạy qua asyncio.to_thread (vnstock là call đồng bộ) để không chặn event loop,
 theo đúng pattern signal_service.scheduler_loop.
 
-Ngân sách mỗi chu kỳ (giờ GD): 1 price_board(VN100) + 1 price_board(toàn TT) +
-nến intraday mặc định ⇒ ~3 call/chu kỳ × 3 chu kỳ/phút ≈ 9 call/phút (dưới 60).
+Ngân sách mỗi chu kỳ (giờ GD): 1 price_board(toàn TT) + 1 all_symbols + nến
+intraday mặc định ⇒ ~2-3 call/chu kỳ × 3 chu kỳ/phút ≈ 6-9 call/phút (dưới 60).
+Board VN100 (price_board rổ VNALL+HNX) KHÔNG chạy mỗi chu kỳ mà giãn ~1 tiếng/lần
+(BOARD_VN100_INTERVAL_S) — bảng giá + sectors + heatmap đổi chậm, không cần 20s.
 """
 
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import data_source
@@ -24,10 +27,15 @@ logger = logging.getLogger(__name__)
 
 VN_TZ = timezone(timedelta(hours=7))
 
-REALTIME_INTERVAL_S = 20   # trong giờ giao dịch
+REALTIME_INTERVAL_S = 20   # trong giờ giao dịch (nhịp market_wide + warm nến)
 IDLE_INTERVAL_S = 300      # ngoài giờ: vẫn refresh thưa để có giá đóng cửa mới nhất
 MARKET_OPEN_HOUR = 9
 MARKET_CLOSE_HOUR = 15     # tới 15:00 (giờ VN)
+
+# Board VN100 (price_board rổ VNALL+HNX → bảng giá/sectors/heatmap) refresh giãn
+# ~1 tiếng/lần thay vì mỗi chu kỳ 20s: dữ liệu đổi chậm, tiết kiệm ~3 call/phút.
+BOARD_VN100_INTERVAL_S = 3600
+_last_board_vn100_at = 0.0  # time.monotonic() lần refresh board VN100 gần nhất (thành công)
 
 # Nến dựng sẵn cho trang mặc định (FE mở VNINDEX khung 1d khi khởi động).
 WARM_INTRADAY = [("VNINDEX", "1d")]
@@ -58,15 +66,16 @@ def _prev_total_volume_today():
 def refresh_board_vn100():
     """1 request price_board(VN100) → dựng sẵn 4 view: vn100, sectors, heatmap, groups.
 
-    Fetch lỗi → đánh dấu stale, GIỮ snapshot cũ (last-good)."""
+    Fetch lỗi → đánh dấu stale, GIỮ snapshot cũ (last-good). Trả True nếu refresh
+    thành công (để _maybe_refresh_board_vn100 chỉ dời mốc 1 tiếng khi có data mới)."""
     symbols = vn100_service.get_symbols()
     if not symbols:
         market_cache.set_snapshot("board_vn100", None, ok=False)
-        return
+        return False
     board = data_source.fetch_vn100_board(symbols)
     if board is None:
         market_cache.set_snapshot("board_vn100", None, ok=False)
-        return
+        return False
     groups = sector_service.build_groups(board)
     market_cache.set_snapshot(
         "board_vn100",
@@ -77,6 +86,19 @@ def refresh_board_vn100():
             "groups": groups,  # để tra /sectors/symbols theo icb_code
         },
     )
+    return True
+
+
+def _maybe_refresh_board_vn100(now=None):
+    """Refresh board VN100 tối đa mỗi BOARD_VN100_INTERVAL_S (~1 tiếng). Chỉ dời
+    mốc khi refresh THÀNH CÔNG → lần lỗi (rate-limit) được thử lại ở chu kỳ 20s kế
+    thay vì đợi trọn 1 tiếng với bảng giá cũ."""
+    global _last_board_vn100_at
+    now = now if now is not None else time.monotonic()
+    if now - _last_board_vn100_at < BOARD_VN100_INTERVAL_S:
+        return
+    if refresh_board_vn100():
+        _last_board_vn100_at = now
 
 
 def refresh_market_wide():
@@ -121,12 +143,15 @@ def refresh_all():
     """Một lượt refresh đầy đủ. Khóa chống chạy chồng (giống signal_service).
 
     Mỗi bước cô lập: board_vn100 lỗi vẫn KHÔNG chặn market_wide / warm_intraday,
-    và không làm văng lỗi ra scheduler_loop (tránh chết luồng nền vĩnh viễn)."""
+    và không làm văng lỗi ra scheduler_loop (tránh chết luồng nền vĩnh viễn).
+
+    Board VN100 chỉ refresh khi tới hạn ~1 tiếng (_maybe_refresh_board_vn100);
+    market_wide + warm nến vẫn chạy mỗi chu kỳ."""
     if not _refresh_lock.acquire(blocking=False):
         logger.info("market refresh đang chạy — bỏ qua lần gọi chồng")
         return
     try:
-        _run_step(refresh_board_vn100)
+        _run_step(_maybe_refresh_board_vn100)
         _run_step(refresh_market_wide)
         _run_step(warm_intraday)
     finally:

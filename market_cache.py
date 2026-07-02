@@ -65,8 +65,11 @@ def reset():
 
 
 # ===== Nến intraday: TTL + single-flight =====
-INTRADAY_TTL_S = 30          # khung phút/giờ: đổi liên tục trong phiên
-INTRADAY_DAILY_TTL_S = 60    # khung 1d/1w/1mth: chỉ nến đang hình thành đổi
+# FE poll /intraday mỗi ~6s (useIntraday.refetchInterval); TTL đặt ~5-6s để mỗi
+# lần poll đều lấy nến mới thay vì phục vụ lại cache cũ. Nhờ single-flight, N user
+# xem cùng mã vẫn chỉ 1 call vnstock/TTL.
+INTRADAY_TTL_S = 5           # khung phút/giờ: đổi liên tục trong phiên
+INTRADAY_DAILY_TTL_S = 6     # khung 1d/1w/1mth: nến đang hình thành vẫn đổi trong phiên
 _DAILY_INTERVALS = {"1d", "1w", "1mth"}
 
 # (symbol, interval) -> {"data": <dict endpoint>, "fetched_at": float}
