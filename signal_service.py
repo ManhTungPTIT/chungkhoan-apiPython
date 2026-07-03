@@ -55,11 +55,25 @@ SEED_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.seed.json")
 # throttle phải ≥1.0s (≤60/phút); 1.1s (~54/phút) để có biên an toàn — nếu nhanh
 # hơn, một phần mã bị rate-limit mỗi lần refresh. ~100 mã ≈ 110s/lần.
 THROTTLE_S = 1.1
-# Các mốc tính lại trong ngày (giờ VN):
-#   07:00 — trước giờ mở cửa, chốt lại tín hiệu trên nến ngày ĐÃ đóng của phiên
-#           trước (bù nếu lần 15:05 hôm trước lỗi hoặc server tắt qua đêm).
-#   15:05 — sau khi phiên đóng cửa, cập nhật tín hiệu theo nến vừa hoàn tất.
-REFRESH_TIMES = ((7, 0), (15, 5))
+# Mốc tính lại trong ngày (giờ VN): chỉ 15:05, sau khi phiên đóng cửa, cập nhật
+# tín hiệu theo nến vừa hoàn tất. KHÔNG còn mốc 07:00: signal/date/price của nến
+# đã đóng không đổi qua đêm, còn `signal_sessions` luôn tính ĐỘNG theo ngày hiện
+# tại mỗi lần đọc (xem attach_signals) — không có gì cần "làm mới" trước giờ mở
+# cửa. Gọi vnstock trong khung 7h-9h từng khiến luồng tính signal bị treo (API
+# không ổn định lúc thị trường chưa mở) — xem QUIET_WINDOW/_in_quiet_window.
+REFRESH_TIMES = ((15, 5),)
+
+# Khung giờ KHÔNG được gọi vnstock cho signal, kể cả catch-up khi cache stale lúc
+# khởi động lại server — né hang khi API không phản hồi tốt trước giờ mở cửa. Nếu
+# 15:05 hôm trước lỗi, cache chỉ thật sự được bù lại sau 9:00 (khởi động lại sau
+# khung này, hoặc tự nhiên tới mốc 15:05 hôm sau).
+QUIET_WINDOW = (7, 9)  # [7:00, 9:00) giờ VN
+
+
+def _in_quiet_window(now=None):
+    now = now or datetime.now(VN_TZ)
+    start_hour, end_hour = QUIET_WINDOW
+    return start_hour <= now.hour < end_hour
 
 # Retry vòng 2 cho mã fetch lỗi (thường do rate-limit) — backoff luỹ thừa.
 RETRY_COOLDOWN_S = 60  # nghỉ 1 lần giữa vòng 1 và vòng 2 cho rate-limit hồi
@@ -505,15 +519,20 @@ def _coverage_gap(active_fn=None):
 
 async def scheduler_loop():
     """Warm khi cache cũ (khác hôm nay) HOẶC rổ active có nhiều mã chưa phủ
-    (_coverage_gap — vd vừa đổi/mở rộng rổ), sau đó refresh theo REFRESH_TIMES. Sau
-    mỗi refresh vét nốt mã còn rate-limit mỗi phút (_drain_pending). Chạy qua
-    to_thread để không chặn event loop (vnstock là call đồng bộ).
+    (_coverage_gap — vd vừa đổi/mở rộng rổ), sau đó refresh theo REFRESH_TIMES (chỉ
+    còn 15:05). Sau mỗi refresh vét nốt mã còn rate-limit mỗi phút (_drain_pending).
+    Chạy qua to_thread để không chặn event loop (vnstock là call đồng bộ).
+
+    Warm lúc khởi động BỊ CHẶN trong QUIET_WINDOW (7h-9h, xem _in_quiet_window):
+    server restart trong khung này (cache "stale" vì last_refresh là hôm qua) sẽ
+    KHÔNG gọi vnstock — né hang do API không ổn định trước giờ mở cửa. Tín hiệu
+    dùng tạm cache/seed cũ tới khi khởi động lại ngoài khung này hoặc tới 15:05.
 
     KHÔNG ép refresh chỉ vì `_history_candles` (base nến live) rỗng: base chỉ ở RAM
     nên sau restart giữa phiên nó rỗng, nhưng ép refresh mỗi lần khởi động = fetch
     lại ~100 mã → dễ đụng rate-limit khi restart lặp. Chấp nhận: sau restart giữa
     phiên, tín hiệu live tạm ngưng, fallback về tín hiệu cache (vẫn đúng theo nến
-    ngày) tới lượt refresh kế (15:05). Lịch 07:00/boot-ngày-mới vẫn nạp lại base.
+    ngày) tới lượt refresh kế (15:05).
 
     Warm-on-gap KHÔNG gây fetch lặp khi restart: sau 1 lần warm, _volumes (lưu ra
     file) đã phủ rổ → lần khởi động sau không còn gap. Chỉ warm-on-gap NGOÀI giờ
@@ -521,7 +540,7 @@ async def scheduler_loop():
     market_refresher (cùng nã vnstock → rate-limit, nghẽn server)."""
     today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
     stale = _cache.get("last_refresh") != today
-    if stale or (_coverage_gap() and not _is_market_hours()):
+    if not _in_quiet_window() and (stale or (_coverage_gap() and not _is_market_hours())):
         await asyncio.to_thread(refresh_signals)
     await _drain_pending()
     while True:
