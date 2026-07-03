@@ -14,6 +14,8 @@ VALUE_THRESHOLD = 1_000_000_000
 
 _symbols: list[str] = []
 
+_vn100_members: list[str] = []
+
 
 def _process(board: list[dict]) -> list[dict]:
     """Lọc giá trị giao dịch > 1 tỷ, sắp theo value giảm dần."""
@@ -34,6 +36,21 @@ def get_symbols(fetch_fn=data_source.fetch_vn100_symbols) -> list[str]:
     return _symbols
 
 
+def get_vn100_members(fetch_fn=data_source.fetch_vn100_members) -> list[str]:
+    """Danh sách 100 mã rổ VN100 — memoize 1 lần, phục vụ cờ `vn100` trên board
+    (bản đồ sức mạnh dòng tiền chỉ hiển thị mã VN100).
+
+    Fetch hỏng (trả None) → giữ rỗng để lần gọi sau thử lại (self-heal);
+    khi rỗng, build_board gắn vn100=False toàn bộ và FE degrade mềm.
+    """
+    global _vn100_members
+    if not _vn100_members:
+        fetched = fetch_fn()
+        if fetched:
+            _vn100_members = fetched
+    return _vn100_members
+
+
 def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
     """Mã trong rổ có value giao dịch > VALUE_THRESHOLD — cùng tập với bảng hiển thị.
 
@@ -51,17 +68,25 @@ def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
 
 
 def build_board(board: list[dict]) -> dict:
-    """Dựng payload /vn100 từ board ĐÃ fetch sẵn: lọc value + sort + gắn tín hiệu.
+    """Dựng payload /vn100 từ board ĐÃ fetch sẵn: lọc value + sort + gắn cờ VN100
+    + gắn tín hiệu.
 
     Tách khỏi get_board để market_refresher fetch board 1 lần rồi tái dùng cho
     nhiều view (vn100/sectors/heatmap) — không gọi price_board lại.
+
+    Cờ `vn100` (bool) đánh dấu mã thuộc rổ VN100 — trang bản đồ sức mạnh dòng
+    tiền lọc theo cờ này; chưa lấy được danh sách (rỗng) → False toàn bộ.
 
     Tín hiệu mua/bán (field `signal`) lấy từ cache signal_service (tính nền 1 lần/
     phiên) — import trễ để tránh vòng lặp import (signal_service cần vn100_service).
     """
     import signal_service
 
-    return {"data": signal_service.attach_signals(_process(board))}
+    members = set(get_vn100_members())
+    rows = _process(board)
+    for row in rows:
+        row["vn100"] = row["symbol"] in members
+    return {"data": signal_service.attach_signals(rows)}
 
 
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:

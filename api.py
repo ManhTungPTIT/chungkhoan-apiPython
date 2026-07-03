@@ -32,9 +32,11 @@ import vn100_service
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm danh sách mã VN100 lúc khởi động (memoize). Lỗi cũng không sao —
-    # request /vn100 đầu tiên sẽ tự thử lại.
+    # Warm danh sách mã rổ theo dõi + danh sách VN100 (cờ `vn100` trên board)
+    # lúc khởi động (memoize). Lỗi cũng không sao — request /vn100 đầu tiên sẽ
+    # tự thử lại.
     vn100_service.get_symbols()
+    vn100_service.get_vn100_members()
     # Nạp cache tín hiệu từ đĩa (phục vụ ngay) + chạy scheduler nền: warm nếu
     # cache cũ rồi refresh 1 lần/ngày sau đóng cửa. Không chặn server start.
     signal_service.load_cache()
