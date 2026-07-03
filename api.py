@@ -69,6 +69,16 @@ def get_vn100():
     return vn100_service.get_board()  # fallback: cache chưa warm / luồng nền chết
 
 
+@app.get("/api/python/power")
+def get_power():
+    """Bản đồ sức mạnh dòng tiền: rổ VN100, tươi theo chu kỳ market_wide (~20s
+    giờ GD) — payload nhỏ (symbol/price/change_pct/value), không kèm signal."""
+    snap = market_cache.get_snapshot("market_wide")
+    if snap and "power" in snap:
+        return snap["power"]
+    return vn100_service.get_power_board()  # fallback: cache chưa warm / luồng nền chết
+
+
 @app.get("/api/python/intraday")
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),

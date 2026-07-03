@@ -102,7 +102,9 @@ def _maybe_refresh_board_vn100(now=None):
 
 
 def refresh_market_wide():
-    """1 request price_board(toàn TT) → breadth + depth + top-volume (homepage)."""
+    """1 request price_board(toàn TT) → breadth + depth + top-volume (homepage)
+    + power (bản đồ sức mạnh: board toàn TT lọc theo rổ VN100, tươi mỗi chu kỳ
+    thay vì đợi board_vn100 ~1 tiếng — không call vnstock thêm)."""
     symbols = data_source.fetch_all_symbols()
     if not symbols:
         market_cache.set_snapshot("market_wide", None, ok=False)
@@ -120,6 +122,7 @@ def refresh_market_wide():
             ),
             "depth": homepage_service.build_market_depth(snap["bid_ask"]),
             "top_volume": homepage_service.build_top_volume(volumes, snap["bid_ask"], limit=10),
+            "power": vn100_service.build_power_board(snap["board"]),
         },
     )
 

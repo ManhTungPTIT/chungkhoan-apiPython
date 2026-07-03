@@ -89,6 +89,47 @@ def build_board(board: list[dict]) -> dict:
     return {"data": signal_service.attach_signals(rows)}
 
 
+def build_power_board(board: list[dict]) -> dict:
+    """Dựng payload /power (bản đồ sức mạnh dòng tiền) từ board ĐÃ fetch sẵn:
+    lọc value + sort (cùng _process với /vn100) rồi giữ lại mã thuộc rổ VN100,
+    mỗi dòng chỉ 4 field symbol/price/change_pct/value — payload nhỏ, không
+    kèm signal (trang power không dùng).
+
+    Chưa lấy được danh sách VN100 (rỗng) → giữ nguyên board đã lọc value
+    (degrade mềm, tự lành khi get_vn100_members lấy được ở chu kỳ sau).
+    """
+    members = set(get_vn100_members())
+    rows = _process(board)
+    if members:
+        rows = [r for r in rows if r["symbol"] in members]
+    return {
+        "data": [
+            {
+                "symbol": r["symbol"],
+                "price": r.get("price"),
+                "change_pct": r.get("change_pct"),
+                "value": r.get("value"),
+            }
+            for r in rows
+        ]
+    }
+
+
+def get_power_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
+    """Lấy payload /power trực tiếp (fallback khi cache market_wide trống):
+    1 request price_board cho đúng rổ VN100 (~100 mã) → build_power_board.
+
+    Members chưa lấy được / fetch lỗi → {data: []} (FE giữ data cũ qua
+    react-query, lần poll sau tự lành)."""
+    members = get_vn100_members()
+    if not members:
+        return {"data": []}
+    board = fetch_fn(members)
+    if board is None:
+        return {"data": []}
+    return build_power_board(board)
+
+
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
     """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu."""
     symbols = get_symbols()
