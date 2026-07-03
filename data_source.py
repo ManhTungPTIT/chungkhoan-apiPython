@@ -66,6 +66,27 @@ def fetch_vn100_symbols(
         return None
 
 
+def _default_vn100_members_listing():
+    from vnstock import Listing
+
+    return Listing().symbols_by_group("VN100").tolist()
+
+
+def fetch_vn100_members(
+    listing_fn: Callable = _default_vn100_members_listing,
+) -> Optional[list[str]]:
+    """Danh sách 100 mã rổ VN100 — phục vụ cờ `vn100` trên board (bản đồ sức
+    mạnh dòng tiền chỉ hiển thị mã VN100). Trả None nếu lỗi (kể cả rate-limit).
+
+    Tên `members` (không phải `symbols`) vì `fetch_vn100_symbols` đã bị chiếm
+    cho rổ theo dõi mở rộng VNALL + HNX."""
+    try:
+        return listing_fn()
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("listing VN100 thất bại: %s", _short(e))
+        return None
+
+
 def fetch_vn100_board(
     symbols: list[str],
     price_board_fn: Callable = _default_price_board,
