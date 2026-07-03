@@ -51,6 +51,24 @@ CACHE_FILE = _resolve_cache_file()
 # signal hiển thị ngay, khỏi đợi warm refresh. Tín hiệu nến-ngày nên seed cũ vẫn
 # đúng tới 15:05; warm refresh sau đó tự cập nhật.
 SEED_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.seed.json")
+
+
+def _resolve_history_file():
+    """Đường dẫn cache nến base (_history_candles) — sống sót qua restart. Cho
+    phép trỏ sang volume bền qua env SIGNAL_HISTORY_FILE, mặc định cạnh module."""
+    return os.environ.get("SIGNAL_HISTORY_FILE") or os.path.join(
+        os.path.dirname(__file__), "signal_history.json"
+    )
+
+
+# Nến base (_history_candles) trước đây CHỈ ở RAM: restart giữa phiên (deploy,
+# crash, hoặc --reload lúc dev) xoá sạch → _live_signal luôn trả None →
+# attach_signals đóng băng vĩnh viễn ở tín hiệu cache cũ (ảnh chụp lúc refresh
+# gần nhất, có thể là nến "hôm nay" mới hình thành đầu phiên) tới tận 15:05,
+# dù giá đã đổi chiều. Ghi thêm ra file (~2MB cho rổ VN100 đầy đủ lịch sử —
+# rẻ hơn nhiều so với đánh đổi "luôn đóng băng tới 15:05 sau mọi lần restart")
+# để nạp lại ngay lúc khởi động, khỏi đợi refresh theo lịch.
+HISTORY_FILE = _resolve_history_file()
 # Giãn cách giữa mỗi mã. Gói Community vnstock giới hạn 60 request/phút, nên
 # throttle phải ≥1.0s (≤60/phút); 1.1s (~54/phút) để có biên an toàn — nếu nhanh
 # hơn, một phần mã bị rate-limit mỗi lần refresh. ~100 mã ≈ 110s/lần.
@@ -273,6 +291,32 @@ def _save_cache():
         logger.warning("ghi signal cache thất bại: %s", e)
 
 
+def load_history_cache():
+    """Nạp _history_candles (nến base cho tín hiệu live) từ HISTORY_FILE lúc
+    khởi động. Thiếu/hỏng file → rỗng (self-heal ở lần refresh_signals kế —
+    live-merge tạm ngưng, dùng tín hiệu cache, giống hành vi trước khi có fix
+    này); KHÔNG coi là lỗi nghiêm trọng."""
+    global _history_candles
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        data = None
+    _history_candles = data if isinstance(data, dict) else {}
+    return _history_candles
+
+
+def _save_history_cache():
+    """Ghi _history_candles ra HISTORY_FILE — để restart giữa phiên (deploy/
+    crash/--reload) vẫn nạp lại được nến base, tránh đóng băng tín hiệu tới
+    15:05 (xem comment ở HISTORY_FILE)."""
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(_history_candles, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi signal history cache thất bại: %s", e)
+
+
 # ===== Refresh nền =====
 
 def _refresh_one(symbol, history_fn, end):
@@ -353,6 +397,7 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
 
         _cache["last_refresh"] = end
         _save_cache()
+        _save_history_cache()
         return _cache
     finally:
         _refresh_lock.release()
@@ -392,6 +437,7 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
                 sleep_fn(throttle_s)
         _pending = remaining
         _save_cache()
+        _save_history_cache()
         return _pending
     finally:
         _refresh_lock.release()

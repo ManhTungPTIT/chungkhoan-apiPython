@@ -40,6 +40,10 @@ async def lifespan(app: FastAPI):
     # Nạp cache tín hiệu từ đĩa (phục vụ ngay) + chạy scheduler nền: warm nếu
     # cache cũ rồi refresh 1 lần/ngày sau đóng cửa. Không chặn server start.
     signal_service.load_cache()
+    # Nạp nến base (_history_candles) từ đĩa — để restart giữa phiên (deploy/
+    # crash/--reload) vẫn tính được tín hiệu live theo giá hiện tại ngay, thay
+    # vì đóng băng ở tín hiệu cache cũ tới tận 15:05.
+    signal_service.load_history_cache()
     asyncio.create_task(signal_service.scheduler_loop())
     # Luồng refresh nền cho snapshot thị trường dùng chung (board VN100 + toàn TT +
     # nến mặc định). Tự warm ngay khi khởi động → trang có nội dung dựng sẵn.
