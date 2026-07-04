@@ -13,6 +13,7 @@ MACD < Signal. (JS đặt tên "ma20" nhưng gọi calcEMA → thực chất là
 import asyncio
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -473,14 +474,39 @@ def _merge_today(base, live):
     return base + [live]
 
 
+def _phantom_candle(last, live, today):
+    """Nến live sắp bị NỐI như phiên mới trong khi hôm nay thật ra KHÔNG có dữ
+    liệu mới → nến ma (bản sao phiên trước) làm EMA20/MACD lệch → tín hiệu giả.
+    (Bug 04/07/2026: sáng thứ Bảy price_board trả nguyên OHLC chốt thứ Sáu, bị
+    nối thành nến '2026-07-04' → hàng loạt mã cache SELL hiển thị BUY giả.)
+
+    Chặn khi nến live sẽ được nối (khác ngày nến cuối base) VÀ:
+      - hôm nay là thứ Bảy/Chủ nhật — không thể có phiên mới, hoặc
+      - OHLC live trùng hệt nến cuối — board đang trả dữ liệu phiên trước
+        (sáng sớm chưa mở cửa, ngày nghỉ lễ giữa tuần).
+    Nghỉ lễ giữa tuần mà giá board lệch nhẹ so với nến lịch sử (điều chỉnh cổ
+    tức...) vẫn lọt qua kiểm tra trùng — hiếm, chấp nhận sai số này."""
+    if str(last["time"])[:10] == today:
+        return False  # cùng ngày → _merge_today thay thế nến cuối, không nối
+    if date.fromisoformat(today).weekday() >= 5:
+        return True
+    return all(
+        math.isclose(live[k], float(last[k]), rel_tol=1e-9)
+        for k in ("high", "low", "close")
+    )
+
+
 def _live_signal(symbol, row, today):
     """Tín hiệu tính LIVE: ghép nến hôm nay của `row` vào base candles rồi tính lại.
 
-    Thiếu base (chưa refresh/khởi động lại) hoặc row thiếu OHLC → None để caller
-    fallback về tín hiệu đã cache (_cache["signals"])."""
+    Thiếu base (chưa refresh/khởi động lại), row thiếu OHLC, hoặc nến live là
+    nến ma (xem _phantom_candle) → None để caller fallback về tín hiệu đã cache
+    (_cache["signals"])."""
     base = _history_candles.get(symbol)
     live = _live_candle(row, today)
     if not base or live is None:
+        return None
+    if _phantom_candle(base[-1], live, today):
         return None
     return latest_signal(_merge_today(base, live))
 
