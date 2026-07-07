@@ -4,3 +4,4 @@ __pycache__/
 .requirements.txt
 .pytest.ini
 test/
+board_vn100_cache.json

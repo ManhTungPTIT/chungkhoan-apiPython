@@ -1,13 +1,13 @@
-"""FastAPI app — endpoint ĐỌC từ market_cache (snapshot dùng chung), KHÔNG gọi
-vnstock theo từng request.
+"""FastAPI app Ã¢â‚¬â€ endpoint Ã„ÂÃ¡Â»Å’C tÃ¡Â»Â« market_cache (snapshot dÃƒÂ¹ng chung), KHÃƒâ€NG gÃ¡Â»Âi
+vnstock theo tÃ¡Â»Â«ng request.
 
-Luồng market_refresher fetch nền vào cache theo chu kỳ; mọi user đọc cùng một
-snapshot nên số call vnstock không phụ thuộc số user (né rate-limit khi đăng nhập
-đồng loạt). Cache còn trống (vài giây đầu sau boot) hoặc luồng nền chết → endpoint
-tự fallback gọi service trực tiếp để không bao giờ trả trắng.
+LuÃ¡Â»â€œng market_refresher fetch nÃ¡Â»Ân vÃƒÂ o cache theo chu kÃ¡Â»Â³; mÃ¡Â»Âi user Ã„â€˜Ã¡Â»Âc cÃƒÂ¹ng mÃ¡Â»â„¢t
+snapshot nÃƒÂªn sÃ¡Â»â€˜ call vnstock khÃƒÂ´ng phÃ¡Â»Â¥ thuÃ¡Â»â„¢c sÃ¡Â»â€˜ user (nÃƒÂ© rate-limit khi Ã„â€˜Ã„Æ’ng nhÃ¡ÂºÂ­p
+Ã„â€˜Ã¡Â»â€œng loÃ¡ÂºÂ¡t). Cache cÃƒÂ²n trÃ¡Â»â€˜ng (vÃƒÂ i giÃƒÂ¢y Ã„â€˜Ã¡ÂºÂ§u sau boot) hoÃ¡ÂºÂ·c luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t Ã¢â€ â€™ endpoint
+tÃ¡Â»Â± fallback gÃ¡Â»Âi service trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p Ã„â€˜Ã¡Â»Æ’ khÃƒÂ´ng bao giÃ¡Â»Â trÃ¡ÂºÂ£ trÃ¡ÂºÂ¯ng.
 
-Lúc khởi động warm danh sách mã VN100 (memoize). data_source vẫn bắt
-BaseException nên endpoint không bao giờ trả 500 vì lỗi dữ liệu.
+LÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng warm danh sÃƒÂ¡ch mÃƒÂ£ VN100 (memoize). data_source vÃ¡ÂºÂ«n bÃ¡ÂºÂ¯t
+BaseException nÃƒÂªn endpoint khÃƒÂ´ng bao giÃ¡Â»Â trÃ¡ÂºÂ£ 500 vÃƒÂ¬ lÃ¡Â»â€”i dÃ¡Â»Â¯ liÃ¡Â»â€¡u.
 """
 
 import asyncio
@@ -32,21 +32,22 @@ import vn100_service
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm danh sách mã rổ theo dõi + danh sách VN100 (cờ `vn100` trên board)
-    # lúc khởi động (memoize). Lỗi cũng không sao — request /vn100 đầu tiên sẽ
-    # tự thử lại.
+    # Warm danh sÃƒÂ¡ch mÃƒÂ£ rÃ¡Â»â€¢ theo dÃƒÂµi + danh sÃƒÂ¡ch VN100 (cÃ¡Â»Â `vn100` trÃƒÂªn board)
+    # lÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng (memoize). LÃ¡Â»â€”i cÃ…Â©ng khÃƒÂ´ng sao Ã¢â‚¬â€ request /vn100 Ã„â€˜Ã¡ÂºÂ§u tiÃƒÂªn sÃ¡ÂºÂ½
+    # tÃ¡Â»Â± thÃ¡Â»Â­ lÃ¡ÂºÂ¡i.
+    market_refresher.load_board_vn100_cache()
     vn100_service.get_symbols()
     vn100_service.get_vn100_members()
-    # Nạp cache tín hiệu từ đĩa (phục vụ ngay) + chạy scheduler nền: warm nếu
-    # cache cũ rồi refresh 1 lần/ngày sau đóng cửa. Không chặn server start.
+    # NÃ¡ÂºÂ¡p cache tÃƒÂ­n hiÃ¡Â»â€¡u tÃ¡Â»Â« Ã„â€˜Ã„Â©a (phÃ¡Â»Â¥c vÃ¡Â»Â¥ ngay) + chÃ¡ÂºÂ¡y scheduler nÃ¡Â»Ân: warm nÃ¡ÂºÂ¿u
+    # cache cÃ…Â© rÃ¡Â»â€œi refresh 1 lÃ¡ÂºÂ§n/ngÃƒÂ y sau Ã„â€˜ÃƒÂ³ng cÃ¡Â»Â­a. KhÃƒÂ´ng chÃ¡ÂºÂ·n server start.
     signal_service.load_cache()
-    # Nạp nến base (_history_candles) từ đĩa — để restart giữa phiên (deploy/
-    # crash/--reload) vẫn tính được tín hiệu live theo giá hiện tại ngay, thay
-    # vì đóng băng ở tín hiệu cache cũ tới tận 15:05.
+    # NÃ¡ÂºÂ¡p nÃ¡ÂºÂ¿n base (_history_candles) tÃ¡Â»Â« Ã„â€˜Ã„Â©a Ã¢â‚¬â€ Ã„â€˜Ã¡Â»Æ’ restart giÃ¡Â»Â¯a phiÃƒÂªn (deploy/
+    # crash/--reload) vÃ¡ÂºÂ«n tÃƒÂ­nh Ã„â€˜Ã†Â°Ã¡Â»Â£c tÃƒÂ­n hiÃ¡Â»â€¡u live theo giÃƒÂ¡ hiÃ¡Â»â€¡n tÃ¡ÂºÂ¡i ngay, thay
+    # vÃƒÂ¬ Ã„â€˜ÃƒÂ³ng bÃ„Æ’ng Ã¡Â»Å¸ tÃƒÂ­n hiÃ¡Â»â€¡u cache cÃ…Â© tÃ¡Â»â€ºi tÃ¡ÂºÂ­n 15:05.
     signal_service.load_history_cache()
     asyncio.create_task(signal_service.scheduler_loop())
-    # Luồng refresh nền cho snapshot thị trường dùng chung (board VN100 + toàn TT +
-    # nến mặc định). Tự warm ngay khi khởi động → trang có nội dung dựng sẵn.
+    # LuÃ¡Â»â€œng refresh nÃ¡Â»Ân cho snapshot thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng dÃƒÂ¹ng chung (board VN100 + toÃƒÂ n TT +
+    # nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh). TÃ¡Â»Â± warm ngay khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng Ã¢â€ â€™ trang cÃƒÂ³ nÃ¡Â»â„¢i dung dÃ¡Â»Â±ng sÃ¡ÂºÂµn.
     asyncio.create_task(market_refresher.scheduler_loop())
     yield
 
@@ -63,30 +64,44 @@ app.add_middleware(
 
 @app.get("/api/python/vn100")
 def get_vn100():
+    """Ã†Â¯u tiÃƒÂªn view vn100 trong snapshot market_wide (dÃ¡Â»Â±ng lÃ¡ÂºÂ¡i mÃ¡Â»â€”i chu kÃ¡Â»Â³ ~20s
+    tÃ¡Â»Â« board toÃƒÂ n TT Ã¢â€ â€™ signal cÃ¡ÂºÂ¯t trong phiÃƒÂªn hiÃ¡Â»â€¡n ngay); thiÃ¡ÂºÂ¿u (chÃ†Â°a warm /
+    chÃ†Â°a memo rÃ¡Â»â€¢) Ã¢â€ â€™ snapshot board_vn100 (~1 tiÃ¡ÂºÂ¿ng) Ã¢â€ â€™ gÃ¡Â»Âi trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p."""
+    wide = market_cache.get_snapshot("market_wide")
+    if wide and wide.get("vn100"):
+        return wide["vn100"]
     snap = market_cache.get_snapshot("board_vn100")
     if snap:
         return snap["vn100"]
-    return vn100_service.get_board()  # fallback: cache chưa warm / luồng nền chết
+    return vn100_service.get_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
+
+
+@app.get("/api/python/quotes")
+def get_quotes():
+    
+    snap = market_cache.get_snapshot("quotes")
+    if snap:
+        return snap
+    return market_refresher.fetch_quotes_direct()  # fallback: cache chÃ†Â°a warm
 
 
 @app.get("/api/python/power")
 def get_power():
-    """Bản đồ sức mạnh dòng tiền: rổ VN100, tươi theo chu kỳ market_wide (~20s
-    giờ GD) — payload nhỏ (symbol/price/change_pct/value), không kèm signal."""
+    
     snap = market_cache.get_snapshot("market_wide")
     if snap and "power" in snap:
         return snap["power"]
-    return vn100_service.get_power_board()  # fallback: cache chưa warm / luồng nền chết
+    return vn100_service.get_power_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
 
 
 @app.get("/api/python/intraday")
 def get_intraday(
     symbol: str = Query(description="Stock ticker code, e.g. TCB, VNM, HPG"),
     interval: str = Query(
-        "1d", description="Khung thời gian: 1m,5m,15m,30m,1h,1d,1w,1mth"
+        "1d", description="Khung thÃ¡Â»Âi gian: 1m,5m,15m,30m,1h,1d,1w,1mth"
     ),
 ):
-    # Cache theo (symbol, interval) + single-flight: N user mở cùng mã = 1 call.
+    # Cache theo (symbol, interval) + single-flight: N user mÃ¡Â»Å¸ cÃƒÂ¹ng mÃƒÂ£ = 1 call.
     result = market_cache.get_intraday(symbol, interval)
     return {"symbol": symbol, "interval": interval, **result}
 
@@ -101,7 +116,7 @@ def get_sectors():
 
 @app.get("/api/python/sectors/symbols")
 def get_sector_symbols(
-    icb_code: str = Query(description="ICB level-3 code, e.g. 8350 (Ngân hàng)"),
+    icb_code: str = Query(description="ICB level-3 code, e.g. 8350 (NgÃƒÂ¢n hÃƒÂ ng)"),
 ):
     snap = market_cache.get_snapshot("board_vn100")
     if snap:
@@ -111,7 +126,7 @@ def get_sector_symbols(
 
 @app.get("/api/python/heatmap")
 def get_heatmap():
-    """Treemap bản đồ nhiệt: [{ group, icb_code, symbols:[{symbol, change_pct, market_cap}] }]."""
+    
     snap = market_cache.get_snapshot("board_vn100")
     if snap:
         return snap["heatmap"]
@@ -120,18 +135,18 @@ def get_heatmap():
 
 @app.get("/api/python/homepage/top-volume")
 def get_homepage_top_volume(
-    limit: int = Query(10, ge=1, le=100, description="Số mã top theo khối lượng, mặc định 10"),
+    limit: int = Query(10, ge=1, le=100, description="SÃ¡Â»â€˜ mÃƒÂ£ top theo khÃ¡Â»â€˜i lÃ†Â°Ã¡Â»Â£ng, mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh 10"),
 ):
-    """Top mã VN100 theo khối lượng phiên gần nhất + xu hướng mua/bán (đọc cache)."""
+    """Top mÃƒÂ£ VN100 theo khÃ¡Â»â€˜i lÃ†Â°Ã¡Â»Â£ng phiÃƒÂªn gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t + xu hÃ†Â°Ã¡Â»â€ºng mua/bÃƒÂ¡n (Ã„â€˜Ã¡Â»Âc cache)."""
     snap = market_cache.get_snapshot("market_wide")
-    if snap and limit == 10:  # snapshot tính sẵn cho limit mặc định
+    if snap and limit == 10:  # snapshot tÃƒÂ­nh sÃ¡ÂºÂµn cho limit mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh
         return snap["top_volume"]
     return homepage_service.get_top_volume(limit)
 
 
 @app.get("/api/python/homepage/market-depth")
 def get_homepage_market_depth():
-    """Tổng cầu (chờ mua) / tổng cung (chờ bán) toàn thị trường — cộng 3+3 bước giá."""
+    
     snap = market_cache.get_snapshot("market_wide")
     if snap:
         return snap["depth"]
@@ -140,8 +155,9 @@ def get_homepage_market_depth():
 
 @app.get("/api/python/homepage/market-breadth")
 def get_homepage_market_breadth():
-    """Số mã tăng/giảm/đứng giá so với hôm qua (real-time) + tổng KL khớp phiên hôm qua."""
+    
     snap = market_cache.get_snapshot("market_wide")
     if snap:
         return snap["breadth"]
     return homepage_service.get_market_breadth()
+

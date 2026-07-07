@@ -1,17 +1,24 @@
-"""Luồng nền refresh các snapshot dùng chung vào market_cache.
+"""LuÃ¡Â»â€œng nÃ¡Â»Ân refresh cÃƒÂ¡c snapshot dÃƒÂ¹ng chung vÃƒÂ o market_cache.
 
-CHỈ luồng này gọi vnstock cho dữ liệu chung → số call không phụ thuộc số user.
-Chạy qua asyncio.to_thread (vnstock là call đồng bộ) để không chặn event loop,
-theo đúng pattern signal_service.scheduler_loop.
+CHÃ¡Â»Ë† luÃ¡Â»â€œng nÃƒÂ y gÃ¡Â»Âi vnstock cho dÃ¡Â»Â¯ liÃ¡Â»â€¡u chung Ã¢â€ â€™ sÃ¡Â»â€˜ call khÃƒÂ´ng phÃ¡Â»Â¥ thuÃ¡Â»â„¢c sÃ¡Â»â€˜ user.
+ChÃ¡ÂºÂ¡y qua asyncio.to_thread (vnstock lÃƒÂ  call Ã„â€˜Ã¡Â»â€œng bÃ¡Â»â„¢) Ã„â€˜Ã¡Â»Æ’ khÃƒÂ´ng chÃ¡ÂºÂ·n event loop,
+theo Ã„â€˜ÃƒÂºng pattern signal_service.scheduler_loop.
 
-Ngân sách mỗi chu kỳ (giờ GD): 1 price_board(toàn TT) + 1 all_symbols + nến
-intraday mặc định ⇒ ~2-3 call/chu kỳ × 3 chu kỳ/phút ≈ 6-9 call/phút (dưới 60).
-Board VN100 (price_board rổ VNALL+HNX) KHÔNG chạy mỗi chu kỳ mà giãn ~1 tiếng/lần
-(BOARD_VN100_INTERVAL_S) — bảng giá + sectors + heatmap đổi chậm, không cần 20s.
+NgÃƒÂ¢n sÃƒÂ¡ch trong giÃ¡Â»Â GD: tick 5s Ãƒâ€” (1 price_board toÃƒÂ n TT + 1 history nÃ¡ÂºÂ¿n 1D
+VNINDEX cho /quotes) = 24 call/phÃƒÂºt Ã¢â‚¬â€ tick thÃ†Â°Ã¡Â»Âng chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes
+(/quotes); mÃ¡Â»â€”i tick thÃ¡Â»Â© 4 (~20s) tÃƒÂ¡i dÃƒÂ¹ng CÃƒâ„¢NG lÃ¡ÂºÂ§n fetch Ã„â€˜ÃƒÂ³ dÃ¡Â»Â±ng thÃƒÂªm views
+market_wide + warm nÃ¡ÂºÂ¿n VNINDEX (3 call/phÃƒÂºt). Danh sÃƒÂ¡ch mÃƒÂ£ (all_symbols)
+memoize theo ngÃƒÂ y Ã¢â€¡â€™ tÃ¡Â»â€¢ng ~28 call/phÃƒÂºt (dÃ†Â°Ã¡Â»â€ºi 60).
+Board VN100 (price_board rÃ¡Â»â€¢ VNALL+HNX) KHÃƒâ€NG chÃ¡ÂºÂ¡y mÃ¡Â»â€”i chu kÃ¡Â»Â³ mÃƒÂ  giÃƒÂ£n ~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n
+(BOARD_VN100_INTERVAL_S) Ã¢â‚¬â€ sectors + heatmap Ã„â€˜Ã¡Â»â€¢i chÃ¡ÂºÂ­m, khÃƒÂ´ng cÃ¡ÂºÂ§n 20s. RiÃƒÂªng view
+/vn100 (bÃ¡ÂºÂ£ng giÃƒÂ¡ + signal) Ã„â€˜Ã†Â°Ã¡Â»Â£c dÃ¡Â»Â±ng lÃ¡ÂºÂ¡i mÃ¡Â»â€”i ~20s tÃ¡Â»Â« board toÃƒÂ n TT cÃ¡Â»Â§a
+market_wide (_vn100_view) Ã„â€˜Ã¡Â»Æ’ signal cÃ¡ÂºÂ¯t trong phiÃƒÂªn khÃƒÂ´ng bÃ¡Â»â€¹ Ã„â€˜ÃƒÂ³ng bÃ„Æ’ng theo giÃ¡Â»Â.
 """
 
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,26 +34,36 @@ logger = logging.getLogger(__name__)
 
 VN_TZ = timezone(timedelta(hours=7))
 
-REALTIME_INTERVAL_S = 20   # trong giờ giao dịch (nhịp market_wide + warm nến)
-IDLE_INTERVAL_S = 300      # ngoài giờ: vẫn refresh thưa để có giá đóng cửa mới nhất
+QUOTES_INTERVAL_S = 5      # tick nhanh trong giÃ¡Â»Â GD: cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes
+VIEWS_EVERY_TICKS = 4      # mÃ¡Â»â€”i tick thÃ¡Â»Â© 4 (4Ãƒâ€”5s = 20s) dÃ¡Â»Â±ng thÃƒÂªm views nÃ¡ÂºÂ·ng
+REALTIME_INTERVAL_S = QUOTES_INTERVAL_S * VIEWS_EVERY_TICKS  # nhÃ¡Â»â€¹p views (nhÃ†Â° cÃ…Â© 20s)
+IDLE_INTERVAL_S = 300      # ngoÃƒÂ i giÃ¡Â»Â: vÃ¡ÂºÂ«n refresh thÃ†Â°a Ã„â€˜Ã¡Â»Æ’ cÃƒÂ³ giÃƒÂ¡ Ã„â€˜ÃƒÂ³ng cÃ¡Â»Â­a mÃ¡Â»â€ºi nhÃ¡ÂºÂ¥t
 MARKET_OPEN_HOUR = 9
-MARKET_CLOSE_HOUR = 15     # tới 15:00 (giờ VN)
+MARKET_CLOSE_HOUR = 15     # tÃ¡Â»â€ºi 15:00 (giÃ¡Â»Â VN)
 
-# Board VN100 (price_board rổ VNALL+HNX → bảng giá/sectors/heatmap) refresh giãn
-# ~1 tiếng/lần thay vì mỗi chu kỳ 20s: dữ liệu đổi chậm, tiết kiệm ~3 call/phút.
+# Danh sÃƒÂ¡ch mÃƒÂ£ toÃƒÂ n TT memoize theo NGÃƒâ‚¬Y: listing chÃ¡Â»â€° Ã„â€˜Ã¡Â»â€¢i khi cÃƒÂ³ niÃƒÂªm yÃ¡ÂºÂ¿t mÃ¡Â»â€ºi
+# (rÃ¡ÂºÂ¥t hiÃ¡ÂºÂ¿m), trÃ†Â°Ã¡Â»â€ºc Ã„â€˜ÃƒÂ¢y fetch mÃ¡Â»â€”i chu kÃ¡Â»Â³ 20s = 3 call/phÃƒÂºt vÃƒÂ´ ÃƒÂ­ch.
+_all_symbols: list[str] = []
+_all_symbols_date = None   # ngÃƒÂ y (giÃ¡Â»Â VN) Ã„â€˜ÃƒÂ£ fetch danh sÃƒÂ¡ch thÃƒÂ nh cÃƒÂ´ng
+
+# Board VN100 (price_board rÃ¡Â»â€¢ VNALL+HNX Ã¢â€ â€™ bÃ¡ÂºÂ£ng giÃƒÂ¡/sectors/heatmap) refresh giÃƒÂ£n
+# ~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n thay vÃƒÂ¬ mÃ¡Â»â€”i chu kÃ¡Â»Â³ 20s: dÃ¡Â»Â¯ liÃ¡Â»â€¡u Ã„â€˜Ã¡Â»â€¢i chÃ¡ÂºÂ­m, tiÃ¡ÂºÂ¿t kiÃ¡Â»â€¡m ~3 call/phÃƒÂºt.
 BOARD_VN100_INTERVAL_S = 3600
-_last_board_vn100_at = 0.0  # time.monotonic() lần refresh board VN100 gần nhất (thành công)
-
-# Nến dựng sẵn cho trang mặc định (FE mở VNINDEX khung 1d khi khởi động).
+_last_board_vn100_at = 0.0  # time.monotonic() lÃ¡ÂºÂ§n refresh board VN100 gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t (thÃƒÂ nh cÃƒÂ´ng)
+BOARD_VN100_CACHE_FILE = os.environ.get(
+    "BOARD_VN100_CACHE_FILE",
+    os.path.join(os.path.dirname(__file__), "board_vn100_cache.json"),
+)
+# NÃ¡ÂºÂ¿n dÃ¡Â»Â±ng sÃ¡ÂºÂµn cho trang mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh (FE mÃ¡Â»Å¸ VNINDEX khung 1d khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng).
 WARM_INTRADAY = [("VNINDEX", "1d")]
 
 _refresh_lock = threading.Lock()
-_prev_volume_date = None   # ngày đã tính prev_total_volume (chỉ đổi theo ngày)
+_prev_volume_date = None   # ngÃƒÂ y Ã„â€˜ÃƒÂ£ tÃƒÂ­nh prev_total_volume (chÃ¡Â»â€° Ã„â€˜Ã¡Â»â€¢i theo ngÃƒÂ y)
 _prev_total_volume = 0
 
 
 def is_market_hours(now=None):
-    """T2–T6, 09:00 ≤ giờ < 15:00 (giờ VN). Ngoài khoảng này coi như ngoài phiên."""
+    """T2Ã¢â‚¬â€œT6, 09:00 Ã¢â€°Â¤ giÃ¡Â»Â < 15:00 (giÃ¡Â»Â VN). NgoÃƒÂ i khoÃ¡ÂºÂ£ng nÃƒÂ y coi nhÃ†Â° ngoÃƒÂ i phiÃƒÂªn."""
     now = now or datetime.now(VN_TZ)
     if now.weekday() >= 5:  # 5=T7, 6=CN
         return False
@@ -54,7 +71,7 @@ def is_market_hours(now=None):
 
 
 def _prev_total_volume_today():
-    """KL khớp phiên hôm qua — chỉ đổi theo ngày nên tính 1 lần/ngày (3 history call)."""
+    """KL khÃ¡Â»â€ºp phiÃƒÂªn hÃƒÂ´m qua Ã¢â‚¬â€ chÃ¡Â»â€° Ã„â€˜Ã¡Â»â€¢i theo ngÃƒÂ y nÃƒÂªn tÃƒÂ­nh 1 lÃ¡ÂºÂ§n/ngÃƒÂ y (3 history call)."""
     global _prev_volume_date, _prev_total_volume
     today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
     if _prev_volume_date != today:
@@ -63,36 +80,82 @@ def _prev_total_volume_today():
     return _prev_total_volume
 
 
-def refresh_board_vn100():
-    """1 request price_board(VN100) → dựng sẵn 4 view: vn100, sectors, heatmap, groups.
+def _board_has_trades(board) -> bool:
+    """Board TRƯỚC GIỜ MỞ PHIÊN: feed reset accumulated_value theo ngày nên mọi
+    mã đều value=0 dù board đầy row. Các view lọc/scale theo value (power, vn100,
+    heatmap) dựng từ board này sẽ rỗng/0 → phải coi là stale để giữ dữ liệu
+    PHIÊN TRƯỚC (last-good) thay vì ghi đè bằng bản trắng (bug trắng trang
+    power/heatmap/bộ lọc sáng hôm sau)."""
+    return any((r.get("value") or 0) > 0 for r in board)
 
-    Fetch lỗi → đánh dấu stale, GIỮ snapshot cũ (last-good). Trả True nếu refresh
-    thành công (để _maybe_refresh_board_vn100 chỉ dời mốc 1 tiếng khi có data mới)."""
+
+def _build_board_vn100_snapshot(board):
+    groups = sector_service.build_groups(board)
+    return {
+        "vn100": vn100_service.build_board(board),
+        "sectors": sector_service.sectors_view(groups),
+        "heatmap": sector_service.heatmap_view(groups),
+        "groups": groups,
+    }
+
+
+def refresh_board_vn100():
+    """1 request price_board(VN100) -> build cached vn100/sectors/heatmap views.
+
+    Empty/error/pre-open fetches are treated as stale so last-good data is
+    preserved (xem _board_has_trades).
+    """
     symbols = vn100_service.get_symbols()
     if not symbols:
         market_cache.set_snapshot("board_vn100", None, ok=False)
         return False
     board = data_source.fetch_vn100_board(symbols)
-    if board is None:
+    if not board:
         market_cache.set_snapshot("board_vn100", None, ok=False)
         return False
-    groups = sector_service.build_groups(board)
-    market_cache.set_snapshot(
-        "board_vn100",
-        {
-            "vn100": vn100_service.build_board(board),
-            "sectors": sector_service.sectors_view(groups),
-            "heatmap": sector_service.heatmap_view(groups),
-            "groups": groups,  # để tra /sectors/symbols theo icb_code
-        },
-    )
+    if not _board_has_trades(board):
+        if market_cache.get_snapshot("board_vn100"):
+            # Trước giờ mở phiên: giữ snapshot phiên trước (RAM lẫn cache đĩa).
+            market_cache.set_snapshot("board_vn100", None, ok=False)
+            return False
+        # Chưa từng có dữ liệu (boot lần đầu trước phiên): vẫn dựng khung snapshot
+        # để /sectors, /heatmap có nhóm ngành thay vì trống hẳn, nhưng KHÔNG ghi
+        # đĩa và trả False để không dời mốc ~1 tiếng — chu kỳ sau thử lại, vào
+        # phiên là có dữ liệu thật ngay.
+        market_cache.set_snapshot("board_vn100", _build_board_vn100_snapshot(board))
+        return False
+    snapshot = _build_board_vn100_snapshot(board)
+    market_cache.set_snapshot("board_vn100", snapshot)
+    _save_board_vn100_cache(snapshot)
     return True
 
 
+def _save_board_vn100_cache(snapshot):
+    try:
+        with open(BOARD_VN100_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi board_vn100 cache that bai: %s", e)
+
+
+def load_board_vn100_cache():
+    """Load last-good board_vn100 from disk before the first vnstock refresh."""
+    try:
+        with open(BOARD_VN100_CACHE_FILE, encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.info("khong nap board_vn100 cache tu dia: %s", e)
+        return None
+    if not isinstance(snapshot, dict) or "heatmap" not in snapshot:
+        logger.warning("board_vn100 cache tren dia khong hop le")
+        return None
+    market_cache.set_snapshot("board_vn100", snapshot)
+    return snapshot
+
 def _maybe_refresh_board_vn100(now=None):
-    """Refresh board VN100 tối đa mỗi BOARD_VN100_INTERVAL_S (~1 tiếng). Chỉ dời
-    mốc khi refresh THÀNH CÔNG → lần lỗi (rate-limit) được thử lại ở chu kỳ 20s kế
-    thay vì đợi trọn 1 tiếng với bảng giá cũ."""
+    """Refresh board VN100 tÃ¡Â»â€˜i Ã„â€˜a mÃ¡Â»â€”i BOARD_VN100_INTERVAL_S (~1 tiÃ¡ÂºÂ¿ng). ChÃ¡Â»â€° dÃ¡Â»Âi
+    mÃ¡Â»â€˜c khi refresh THÃƒâ‚¬NH CÃƒâ€NG Ã¢â€ â€™ lÃ¡ÂºÂ§n lÃ¡Â»â€”i (rate-limit) Ã„â€˜Ã†Â°Ã¡Â»Â£c thÃ¡Â»Â­ lÃ¡ÂºÂ¡i Ã¡Â»Å¸ chu kÃ¡Â»Â³ 20s kÃ¡ÂºÂ¿
+    thay vÃƒÂ¬ Ã„â€˜Ã¡Â»Â£i trÃ¡Â»Ân 1 tiÃ¡ÂºÂ¿ng vÃ¡Â»â€ºi bÃ¡ÂºÂ£ng giÃƒÂ¡ cÃ…Â©."""
     global _last_board_vn100_at
     now = now if now is not None else time.monotonic()
     if now - _last_board_vn100_at < BOARD_VN100_INTERVAL_S:
@@ -101,16 +164,133 @@ def _maybe_refresh_board_vn100(now=None):
         _last_board_vn100_at = now
 
 
-def refresh_market_wide():
-    """1 request price_board(toàn TT) → breadth + depth + top-volume (homepage)
-    + power (bản đồ sức mạnh: board toàn TT lọc theo rổ VN100, tươi mỗi chu kỳ
-    thay vì đợi board_vn100 ~1 tiếng — không call vnstock thêm)."""
-    symbols = data_source.fetch_all_symbols()
+def _all_symbols_today():
+    """Danh sÃƒÂ¡ch mÃƒÂ£ toÃƒÂ n TT, memoize theo ngÃƒÂ y. Fetch lÃ¡Â»â€”i Ã¢â€ â€™ trÃ¡ÂºÂ£ bÃ¡ÂºÂ£n cÃ…Â© nÃ¡ÂºÂ¿u cÃƒÂ³
+    (stale vÃ¡ÂºÂ«n hÃ†Â¡n rÃ¡Â»â€”ng Ã¢â‚¬â€ rÃ¡Â»â€¢ niÃƒÂªm yÃ¡ÂºÂ¿t gÃ¡ÂºÂ§n nhÃ†Â° khÃƒÂ´ng Ã„â€˜Ã¡Â»â€¢i trong ngÃƒÂ y), memo date
+    khÃƒÂ´ng dÃ¡Â»Âi nÃƒÂªn tick sau tÃ¡Â»Â± thÃ¡Â»Â­ lÃ¡ÂºÂ¡i (self-heal)."""
+    global _all_symbols, _all_symbols_date
+    today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+    if _all_symbols and _all_symbols_date == today:
+        return _all_symbols
+    fetched = data_source.fetch_all_symbols()
+    if fetched:
+        _all_symbols = fetched
+        _all_symbols_date = today
+    return _all_symbols
+
+
+# Index cÃ¡ÂºÂ§n giÃƒÂ¡ realtime trong /quotes (mÃƒÂ n hÃƒÂ¬nh mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh FE mÃ¡Â»Å¸ VNINDEX). Index
+# khÃƒÂ´ng cÃƒÂ³ trong price_board (board chÃ¡Â»â€° cÃ¡Â»â€¢ phiÃ¡ÂºÂ¿u) Ã¢â€ â€™ fetch riÃƒÂªng qua history.
+INDEX_QUOTE_SYMBOLS = ["VNINDEX"]
+
+
+def _fetch_index_quotes():
+    """GiÃƒÂ¡ index cho /quotes: nÃ¡ÂºÂ¿n 1D cÃ¡Â»Â§a RIÃƒÅ NG hÃƒÂ´m nay (1 call/index, trÃ¡ÂºÂ£ 1 nÃ¡ÂºÂ¿n)
+    Ã¢â‚¬â€ close = Ã„â€˜iÃ¡Â»Æ’m hiÃ¡Â»â€¡n tÃ¡ÂºÂ¡i, volume = KL khÃ¡Â»â€ºp cÃ¡Â»â„¢ng dÃ¡Â»â€œn phiÃƒÂªn. NguÃ¡Â»â€œn history nÃƒÂªn
+    Ã„â€˜Ã†Â¡n vÃ¡Â»â€¹ lÃƒÂ  Ã„ÂIÃ¡Â»â€šM, khÃ¡Â»â€ºp sÃ¡ÂºÂµn nÃ¡ÂºÂ¿n /intraday cÃ¡Â»Â§a index (KHÃƒâ€NG chia
+    PRICE_BOARD_SCALE nhÃ†Â° cÃ¡Â»â€¢ phiÃ¡ÂºÂ¿u). Fetch lÃ¡Â»â€”i / nÃ¡ÂºÂ¿n rÃ¡Â»â€”ng (cuÃ¡Â»â€˜i tuÃ¡ÂºÂ§n, trÃ†Â°Ã¡Â»â€ºc
+    phiÃƒÂªn) Ã¢â€ â€™ bÃ¡Â»Â mÃƒÂ£ Ã„â€˜ÃƒÂ³ Ã¢â‚¬â€ index thiÃ¡ÂºÂ¿u khÃƒÂ´ng chÃ¡ÂºÂ·n quotes cÃ¡Â»â€¢ phiÃ¡ÂºÂ¿u."""
+    today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+    quotes = {}
+    for symbol in INDEX_QUOTE_SYMBOLS:
+        rows = data_source.fetch_intraday_history(symbol, today, today, "1D")
+        if not rows:
+            continue
+        last = rows[-1]
+        try:
+            price = float(last["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        quotes[symbol] = {"price": price, "volume": last.get("volume", 0)}
+    return quotes
+
+
+def _build_quotes(board, index_quotes=None):
+    """Payload /quotes: {"time": ISO giÃ¡Â»Â VN, "data": {symbol: {price, volume}}}.
+
+    GiÃƒÂ¡ cÃ¡Â»â€¢ phiÃ¡ÂºÂ¿u tÃ¡Â»Â« price_board lÃƒÂ  VND thÃƒÂ´ (vd 62900) cÃƒÂ²n nÃ¡ÂºÂ¿n /intraday theo
+    nghÃƒÂ¬n Ã„â€˜Ã¡Â»â€œng (62.9) Ã¢â€ â€™ chia PRICE_BOARD_SCALE Ã„â€˜Ã¡Â»Æ’ FE merge thÃ¡ÂºÂ³ng vÃƒÂ o nÃ¡ÂºÂ¿n, khÃƒÂ´ng
+    quy Ã„â€˜Ã¡Â»â€¢i (xem signal_service). MÃƒÂ£ chÃ†Â°a khÃ¡Â»â€ºp lÃ¡Â»â€¡nh (price <= 0) bÃ¡Â»â€¹ loÃ¡ÂºÂ¡i Ã¢â‚¬â€ FE
+    merge low=0 vÃƒÂ o nÃ¡ÂºÂ¿n sÃ¡ÂºÂ½ sÃ¡ÂºÂ­p thang giÃƒÂ¡. `index_quotes` (Ã„â€˜Ã†Â¡n vÃ¡Â»â€¹ Ã„â€˜iÃ¡Â»Æ’m, Ã„â€˜ÃƒÂ£ Ã„â€˜ÃƒÂºng
+    sÃ¡ÂºÂµn) gÃ¡Â»â„¢p thÃ¡ÂºÂ³ng vÃƒÂ o data.
+
+    `time` Ã„â€˜Ã¡ÂºÂ·t 1 lÃ¡ÂºÂ§n Ã¡Â»Å¸ ngoÃƒÂ i Ã¢â‚¬â€ cÃ¡ÂºÂ£ snapshot chÃ¡Â»Â¥p cÃƒÂ¹ng thÃ¡Â»Âi Ã„â€˜iÃ¡Â»Æ’m, lÃ¡ÂºÂ·p theo tÃ¡Â»Â«ng mÃƒÂ£
+    chÃ¡Â»â€° phÃƒÂ¬nh payload (~1600 mÃƒÂ£); FE ÃƒÂ¡p time nÃƒÂ y cho mÃ¡Â»Âi mÃƒÂ£. `volume` lÃƒÂ  KL khÃ¡Â»â€ºp
+    tÃƒÂ­ch lÃ…Â©y phiÃƒÂªn."""
+    data = {}
+    for r in board:
+        price = r["price"]
+        if not price or price <= 0:
+            continue
+        data[r["symbol"]] = {
+            "price": price / signal_service.PRICE_BOARD_SCALE,
+            "volume": r.get("volume", 0),
+        }
+    if index_quotes:
+        data.update(index_quotes)
+    return {
+        "time": int(datetime.now(VN_TZ).timestamp()),
+        "data": data,
+    }
+
+
+def fetch_quotes_direct():
+    """Fallback cho /quotes khi cache chÃ†Â°a warm (vÃƒÂ i giÃƒÂ¢y Ã„â€˜Ã¡ÂºÂ§u sau boot): 1
+    request price_board trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p (+1 history cho index). LÃ¡Â»â€”i Ã¢â€ â€™ {time: None,
+    data: {}} (FE poll lÃ¡ÂºÂ§n sau tÃ¡Â»Â± lÃƒÂ nh, khÃƒÂ´ng 500)."""
+    symbols = _all_symbols_today()
+    board = data_source.fetch_vn100_board(symbols) if symbols else None
+    if not board:
+        return {"time": None, "data": {}}
+    return _build_quotes(board, _fetch_index_quotes())
+
+
+def _vn100_view(board):
+    """View /vn100 dÃ¡Â»Â±ng tÃ¡Â»Â« board TOÃƒâ‚¬N thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng: lÃ¡Â»Âc vÃ¡Â»Â rÃ¡Â»â€¢ theo dÃƒÂµi rÃ¡Â»â€œi
+    build_board (lÃ¡Â»Âc value + sort + gÃ¡ÂºÂ¯n signal). ChÃ¡ÂºÂ¡y mÃ¡Â»â€”i chu kÃ¡Â»Â³ 20s Ã„â€˜Ã¡Â»Æ’ tÃƒÂ­n hiÃ¡Â»â€¡u
+    cÃ¡ÂºÂ¯t TRONG PHIÃƒÅ N hiÃ¡Â»â€¡n ngay Ã¢â‚¬â€ trÃ†Â°Ã¡Â»â€ºc Ã„â€˜ÃƒÂ¢y field signal chÃ¡Â»â€° Ã„â€˜Ã†Â°Ã¡Â»Â£c attach lÃƒÂºc dÃ¡Â»Â±ng
+    snapshot board_vn100 (~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n) nÃƒÂªn Ã„â€˜ÃƒÂ´ng cÃ¡Â»Â©ng cÃ¡ÂºÂ£ giÃ¡Â»Â dÃƒÂ¹ giÃƒÂ¡ Ã„â€˜ÃƒÂ£ cÃ¡ÂºÂ¯t
+    EMA20/MACD (bug 07/07/2026). KhÃƒÂ´ng call vnstock thÃƒÂªm: tÃƒÂ¡i dÃƒÂ¹ng board cÃ¡Â»Â§a
+    fetch_market_snapshot. ChÃ†Â°a cÃƒÂ³ danh sÃƒÂ¡ch rÃ¡Â»â€¢ (listing lÃ¡Â»â€”i) Ã¢â€ â€™ None Ã„â€˜Ã¡Â»Æ’ endpoint
+    fallback snapshot board_vn100."""
+    basket = set(vn100_service.get_symbols())
+    if not basket:
+        return None
+    return vn100_service.build_board([r for r in board if r["symbol"] in basket])
+
+
+def refresh_tick(build_views=True):
+    """1 request price_board(toÃƒÂ n TT) mÃ¡Â»â€”i tick Ã¢â€ â€™ LUÃƒâ€N cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot `quotes`
+    (giÃƒÂ¡ + KL khÃ¡Â»â€ºp real-time cho /quotes, nhÃ¡Â»â€¹p 5s trong giÃ¡Â»Â GD).
+
+    build_views=True (mÃ¡Â»â€”i tick thÃ¡Â»Â© VIEWS_EVERY_TICKS ~20s, lÃƒÂºc warm, vÃƒÂ  ngoÃƒÂ i
+    giÃ¡Â»Â) dÃ¡Â»Â±ng thÃƒÂªm snapshot `market_wide`: breadth + depth + top-volume + power
+    + vn100 (bÃ¡ÂºÂ£ng giÃƒÂ¡ kÃƒÂ¨m signal live, xem _vn100_view) Ã¢â‚¬â€ tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tÃ¡Â»Â« CÃƒâ„¢NG mÃ¡Â»â„¢t
+    lÃ¡ÂºÂ§n fetch, khÃƒÂ´ng call vnstock thÃƒÂªm. Fetch lÃ¡Â»â€”i Ã¢â€ â€™ Ã„â€˜ÃƒÂ¡nh dÃ¡ÂºÂ¥u stale cÃ¡ÂºÂ£ hai,
+    giÃ¡Â»Â¯ bÃ¡ÂºÂ£n tÃ¡Â»â€˜t gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t (last-good)."""
+    symbols = _all_symbols_today()
     if not symbols:
-        market_cache.set_snapshot("market_wide", None, ok=False)
+        market_cache.set_snapshot("quotes", None, ok=False)
+        if build_views:
+            market_cache.set_snapshot("market_wide", None, ok=False)
         return
     snap = data_source.fetch_market_snapshot(symbols)
     if snap is None:
+        market_cache.set_snapshot("quotes", None, ok=False)
+        if build_views:
+            market_cache.set_snapshot("market_wide", None, ok=False)
+        return
+    market_cache.set_snapshot(
+        "quotes", _build_quotes(snap["board"], _fetch_index_quotes())
+    )
+    if not build_views:
+        return
+    preopen = not _board_has_trades(snap["board"])
+    if preopen and market_cache.get_snapshot("market_wide"):
+        # Trước giờ mở phiên: giữ market_wide phiên trước (power/vn100 dựng từ
+        # board value=0 sẽ rỗng → trang power + bộ lọc trắng).
         market_cache.set_snapshot("market_wide", None, ok=False)
         return
     volumes = signal_service.volumes_snapshot()
@@ -122,49 +302,84 @@ def refresh_market_wide():
             ),
             "depth": homepage_service.build_market_depth(snap["bid_ask"]),
             "top_volume": homepage_service.build_top_volume(volumes, snap["bid_ask"], limit=10),
-            "power": vn100_service.build_power_board(snap["board"]),
+            # Boot trước phiên (chưa có last-good): giữ key `power` rỗng để
+            # endpoint /power không fan-out fetch theo request; vn100=None để
+            # endpoint /vn100 fallback snapshot board_vn100 (last-good từ đĩa).
+            "power": {"data": []} if preopen else vn100_service.build_power_board(snap["board"]),
+            "vn100": None if preopen else _vn100_view(snap["board"]),
         },
     )
 
 
 def warm_intraday():
-    """Nạp nến mặc định vào cache (tôn trọng TTL + single-flight của market_cache)."""
+    """NÃ¡ÂºÂ¡p nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh vÃƒÂ o cache (tÃƒÂ´n trÃ¡Â»Âng TTL + single-flight cÃ¡Â»Â§a market_cache)."""
     for symbol, interval in WARM_INTRADAY:
         market_cache.get_intraday(symbol, interval)
 
 
 def _run_step(step):
-    """Chạy 1 bước refresh, nuốt mọi lỗi (chỉ log) để 1 bước hỏng không kéo theo
-    các bước còn lại và không giết scheduler_loop."""
+    """ChÃ¡ÂºÂ¡y 1 bÃ†Â°Ã¡Â»â€ºc refresh, nuÃ¡Â»â€˜t mÃ¡Â»Âi lÃ¡Â»â€”i (chÃ¡Â»â€° log) Ã„â€˜Ã¡Â»Æ’ 1 bÃ†Â°Ã¡Â»â€ºc hÃ¡Â»Âng khÃƒÂ´ng kÃƒÂ©o theo
+    cÃƒÂ¡c bÃ†Â°Ã¡Â»â€ºc cÃƒÂ²n lÃ¡ÂºÂ¡i vÃƒÂ  khÃƒÂ´ng giÃ¡ÂºÂ¿t scheduler_loop."""
     try:
         step()
-    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
-        logger.warning("refresh step %s thất bại: %s", step.__name__, e)
+    except BaseException as e:  # noqa: BLE001 Ã¢â‚¬â€ cÃ¡Â»â€˜ ÃƒÂ½ bÃ¡ÂºÂ¯t cÃ¡ÂºÂ£ SystemExit
+        logger.warning("refresh step %s thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i: %s", step.__name__, e)
 
 
 def refresh_all():
-    """Một lượt refresh đầy đủ. Khóa chống chạy chồng (giống signal_service).
+    """MÃ¡Â»â„¢t lÃ†Â°Ã¡Â»Â£t refresh Ã„â€˜Ã¡ÂºÂ§y Ã„â€˜Ã¡Â»Â§. KhÃƒÂ³a chÃ¡Â»â€˜ng chÃ¡ÂºÂ¡y chÃ¡Â»â€œng (giÃ¡Â»â€˜ng signal_service).
 
-    Mỗi bước cô lập: board_vn100 lỗi vẫn KHÔNG chặn market_wide / warm_intraday,
-    và không làm văng lỗi ra scheduler_loop (tránh chết luồng nền vĩnh viễn).
+    MÃ¡Â»â€”i bÃ†Â°Ã¡Â»â€ºc cÃƒÂ´ lÃ¡ÂºÂ­p: board_vn100 lÃ¡Â»â€”i vÃ¡ÂºÂ«n KHÃƒâ€NG chÃ¡ÂºÂ·n market_wide / warm_intraday,
+    vÃƒÂ  khÃƒÂ´ng lÃƒÂ m vÃ„Æ’ng lÃ¡Â»â€”i ra scheduler_loop (trÃƒÂ¡nh chÃ¡ÂºÂ¿t luÃ¡Â»â€œng nÃ¡Â»Ân vÃ„Â©nh viÃ¡Â»â€¦n).
 
-    Board VN100 chỉ refresh khi tới hạn ~1 tiếng (_maybe_refresh_board_vn100);
-    market_wide + warm nến vẫn chạy mỗi chu kỳ."""
+    Board VN100 chÃ¡Â»â€° refresh khi tÃ¡Â»â€ºi hÃ¡ÂºÂ¡n ~1 tiÃ¡ÂºÂ¿ng (_maybe_refresh_board_vn100);
+    quotes + market_wide + warm nÃ¡ÂºÂ¿n vÃ¡ÂºÂ«n chÃ¡ÂºÂ¡y mÃ¡Â»â€”i lÃ†Â°Ã¡Â»Â£t."""
     if not _refresh_lock.acquire(blocking=False):
-        logger.info("market refresh đang chạy — bỏ qua lần gọi chồng")
+        logger.info("market refresh Ã„â€˜ang chÃ¡ÂºÂ¡y Ã¢â‚¬â€ bÃ¡Â»Â qua lÃ¡ÂºÂ§n gÃ¡Â»Âi chÃ¡Â»â€œng")
         return
     try:
         _run_step(_maybe_refresh_board_vn100)
-        _run_step(refresh_market_wide)
+        _run_step(refresh_tick)
         _run_step(warm_intraday)
     finally:
         _refresh_lock.release()
 
 
+def _quotes_tick():
+    refresh_tick(build_views=False)
+
+
+def refresh_quotes_only():
+    """Tick nhanh 5s trong giÃ¡Â»Â GD: chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes (1 call
+    price_board). DÃƒÂ¹ng chung khÃƒÂ³a vÃ¡Â»â€ºi refresh_all Ã„â€˜Ã¡Â»Æ’ khÃƒÂ´ng fetch chÃ¡Â»â€œng."""
+    if not _refresh_lock.acquire(blocking=False):
+        logger.info("market refresh Ã„â€˜ang chÃ¡ÂºÂ¡y Ã¢â‚¬â€ bÃ¡Â»Â qua tick quotes")
+        return
+    try:
+        _run_step(_quotes_tick)
+    finally:
+        _refresh_lock.release()
+
+
 async def scheduler_loop():
-    """Warm ngay lúc khởi động rồi refresh theo chu kỳ; giãn nhịp ngoài giờ GD."""
+    """Warm ngay lÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng rÃ¡Â»â€œi chÃ¡ÂºÂ¡y tick: trong giÃ¡Â»Â GD ngÃ¡Â»Â§ 5s/tick Ã¢â‚¬â€ tick
+    thÃ†Â°Ã¡Â»Âng chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t quotes, mÃ¡Â»â€”i tick thÃ¡Â»Â© VIEWS_EVERY_TICKS (~20s) chÃ¡ÂºÂ¡y
+    refresh_all (views + warm nÃ¡ÂºÂ¿n + board_vn100 tÃ¡Â»â€ºi hÃ¡ÂºÂ¡n); ngoÃƒÂ i giÃ¡Â»Â giÃƒÂ£n 300s,
+    mÃ¡Â»â€”i lÃ†Â°Ã¡Â»Â£t chÃ¡ÂºÂ¡y full refresh_all (quotes vÃ¡ÂºÂ«n Ã„â€˜Ã†Â°Ã¡Â»Â£c cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t kÃƒÂ¨m Ã¢â‚¬â€ giÃƒÂ¡ Ã„â€˜ÃƒÂ³ng
+    cÃ¡Â»Â­a, khÃƒÂ´ng cÃ¡ÂºÂ§n nhÃ¡Â»â€¹p nhanh)."""
     await asyncio.to_thread(refresh_all)
+    tick = 0
     while True:
-        interval = REALTIME_INTERVAL_S if is_market_hours() else IDLE_INTERVAL_S
-        await asyncio.sleep(interval)
-        await asyncio.to_thread(refresh_all)
+        if is_market_hours():
+            await asyncio.sleep(QUOTES_INTERVAL_S)
+            tick += 1
+            if tick % VIEWS_EVERY_TICKS == 0:
+                await asyncio.to_thread(refresh_all)
+            else:
+                await asyncio.to_thread(refresh_quotes_only)
+        else:
+            tick = 0
+            await asyncio.sleep(IDLE_INTERVAL_S)
+            await asyncio.to_thread(refresh_all)
+
+

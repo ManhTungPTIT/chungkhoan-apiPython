@@ -1,4 +1,4 @@
-"""Tín hiệu mua/bán Trend (EMA20 + MACD) cho rổ VN100 — tính nền, cache file.
+"""Tín hiệu mua/bán Trend (SMA20 + MACD) cho rổ VN100 — tính nền, cache file.
 
 Nến *ngày* chỉ đổi tối đa 1 lần/phiên (lúc đóng cửa) nên lịch sử được fetch chậm
 (throttle) 1 lần/ngày, tính tín hiệu cuối mỗi mã rồi cache ra JSON. Endpoint
@@ -6,8 +6,9 @@ Nến *ngày* chỉ đổi tối đa 1 lần/phiên (lúc đóng cửa) nên l�
 không phải fetch 100 mã → né rate limit.
 
 Logic port từ chart/src/feature/chart/untils/indicators.js (generateSignals):
-vào lệnh khi close > EMA20 VÀ MACD > Signal; ra lệnh khi close < EMA20 VÀ
-MACD < Signal. (JS đặt tên "ma20" nhưng gọi calcEMA → thực chất là EMA20.)
+vào lệnh khi close > SMA20 VÀ MACD > Signal; ra lệnh khi close < SMA20 VÀ
+MACD < Signal. Đường MA20 dùng SMA (07/2026 FE đổi calcEMA → calcSMA, BE đổi
+theo để chart và panel khớp tín hiệu); MACD(12,26,9) vẫn EMA đúng định nghĩa.
 """
 
 import asyncio
@@ -149,6 +150,19 @@ def _ema(values, period):
     return out
 
 
+def _sma(values, period):
+    """SMA trượt; out[j] ánh xạ tới values[period-1+j] (cùng quy ước _ema).
+    Thiếu dữ liệu → []. Port từ smaOf của FE (indicators.js)."""
+    if len(values) < period:
+        return []
+    total = sum(values[:period])
+    out = [total / period]
+    for i in range(period, len(values)):
+        total += values[i] - values[i - period]
+        out.append(total / period)
+    return out
+
+
 def _macd_values(closes):
     """Mảng MACD(12,26,9); macd[m] ứng với closes[25+m] (như calcMACD trong JS)."""
     ema12 = _ema(closes, 12)
@@ -162,11 +176,11 @@ def _macd_values(closes):
 def compute_signals(candles):
     """Máy trạng thái flat↔long. candles: list dict {time, high, low, close}.
 
-    Ánh xạ index như JS: EMA20 tại nến i = ema20[i-19]; MACD = macd[i-25];
+    Ánh xạ index như JS: SMA20 tại nến i = ma20[i-19]; MACD = macd[i-25];
     Signal = sig[i-33]. Vòng lặp bắt đầu i=34 (cần ≥35 nến).
     """
     closes = [c["close"] for c in candles]
-    ema20 = _ema(closes, 20)
+    ma20 = _sma(closes, 20)
     macd = _macd_values(closes)
     sig = _ema(macd, 9)
 
@@ -174,7 +188,7 @@ def compute_signals(candles):
     in_long = False
     for i in range(34, len(candles)):
         close = candles[i]["close"]
-        ma = ema20[i - 19]
+        ma = ma20[i - 19]
         m = macd[i - 25]
         s = sig[i - 33]
         if not in_long:
@@ -210,20 +224,9 @@ def latest_signal(candles):
     return sigs[-1]
 
 
-def _trading_sessions_since(signal_date, now=None):
-    """Số phiên giao dịch (T2–T6) đã trôi từ ngày báo tới hôm nay (giờ VN).
-
-    Đếm số ngày thường trong khoảng [ngày báo, hôm nay) — báo hôm qua (ngày thường)
-    → 1, báo thứ Sáu xem thứ Hai → 1, báo hôm nay / ngày báo ở tương lai → 0. Ngày
-    báo không hợp lệ / rỗng → None. (Chưa trừ ngày nghỉ lễ — hiếm, chấp nhận sai số
-    nhỏ quanh lễ.)"""
-    if not signal_date:
-        return None
-    try:
-        start = date.fromisoformat(str(signal_date)[:10])
-    except ValueError:
-        return None
-    today = (now or datetime.now(VN_TZ)).date()
+def _weekday_sessions(start, today):
+    """Số ngày thường (T2–T6) trong [start, today) — xấp xỉ số phiên khi không có
+    nến lịch sử để đếm (chưa trừ nghỉ lễ). start >= today → 0."""
     if start >= today:
         return 0
     days = (today - start).days
@@ -234,6 +237,39 @@ def _trading_sessions_since(signal_date, now=None):
         if (weekday + i) % 7 < 5:
             count += 1
     return count
+
+
+def _trading_sessions_since(signal_date, now=None, candles=None):
+    """Số phiên giao dịch đã trôi từ ngày báo tới hôm nay (giờ VN).
+
+    Có `candles` (nến lịch sử của mã, thời gian tăng dần) phủ ngày báo → đếm số
+    nến trong [ngày báo, hôm nay): nến chỉ tồn tại ở phiên giao dịch thật nên tự
+    loại T7/CN LẪN ngày nghỉ lễ, không cần bảng lịch nghỉ. Nến chưa phủ tới sát
+    hôm nay (cache cũ sau vài ngày service ngừng) → phần đuôi sau nến cuối bù
+    bằng đếm ngày thường. Thiếu nến / nến không phủ ngày báo (lịch sử bị cắt
+    ngắn) → fallback đếm ngày thường T2–T6 (chấp nhận sai số nhỏ quanh lễ).
+
+    Báo hôm qua (ngày thường) → 1, báo thứ Sáu xem thứ Hai → 1, báo hôm nay /
+    ngày báo ở tương lai → 0. Ngày báo không hợp lệ / rỗng → None."""
+    if not signal_date:
+        return None
+    try:
+        start = date.fromisoformat(str(signal_date)[:10])
+    except ValueError:
+        return None
+    today = (now or datetime.now(VN_TZ)).date()
+    if start >= today:
+        return 0
+    if candles:
+        try:
+            dates = [date.fromisoformat(str(c["time"])[:10]) for c in candles]
+        except (KeyError, TypeError, ValueError):
+            dates = []
+        if dates and dates[0] <= start:
+            count = sum(1 for d in dates if start <= d < today)
+            tail = max(dates[-1] + timedelta(days=1), start)
+            return count + _weekday_sessions(tail, today)
+    return _weekday_sessions(start, today)
 
 
 def _to_candles(raw):
@@ -446,7 +482,7 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
 
 # price_board (row board) trả giá VND thô (vd 62900), còn nến lịch sử (history)
 # theo NGHÌN đồng (vd 62.9) → phải chia để đưa OHLC board về cùng đơn vị nến base
-# trước khi ghép. Bỏ bước này → nến hôm nay vọt 1000× → close >> EMA20 → BÁO MUA
+# trước khi ghép. Bỏ bước này → nến hôm nay vọt 1000× → close >> SMA20 → BÁO MUA
 # GIẢ hàng loạt. (FE cũng /1000 khi hiển thị giá — xem filterStock.jsx.)
 PRICE_BOARD_SCALE = 1000
 
@@ -476,7 +512,7 @@ def _merge_today(base, live):
 
 def _phantom_candle(last, live, today):
     """Nến live sắp bị NỐI như phiên mới trong khi hôm nay thật ra KHÔNG có dữ
-    liệu mới → nến ma (bản sao phiên trước) làm EMA20/MACD lệch → tín hiệu giả.
+    liệu mới → nến ma (bản sao phiên trước) làm SMA20/MACD lệch → tín hiệu giả.
     (Bug 04/07/2026: sáng thứ Bảy price_board trả nguyên OHLC chốt thứ Sáu, bị
     nối thành nến '2026-07-04' → hàng loạt mã cache SELL hiển thị BUY giả.)
 
@@ -518,7 +554,8 @@ def attach_signals(board, now=None):
       signal_price    — giá tại điểm tín hiệu (None nếu chưa có)
       signal_sessions — số phiên giao dịch từ ngày báo tới HÔM NAY (0 = báo hôm nay,
                         None nếu chưa có tín hiệu) — tính động theo _trading_sessions_since
-                        để luôn đúng theo ngày hiện tại, không đóng băng theo nến cuối.
+                        để luôn đúng theo ngày hiện tại, không đóng băng theo nến cuối;
+                        đếm theo nến base của mã nên tự loại T7/CN và ngày nghỉ lễ.
 
     Ưu tiên tín hiệu LIVE: ghép giá hôm nay (OHLC real-time trong row) vào base nến
     lịch sử rồi tính lại → tín hiệu cắt trong phiên hiện ngay, không phải đợi 15:05.
@@ -534,7 +571,9 @@ def attach_signals(board, now=None):
         row["signal_date"] = entry["date"] if entry else None
         row["signal_price"] = entry["price"] if entry else None
         row["signal_sessions"] = (
-            _trading_sessions_since(entry["date"], now) if entry else None
+            _trading_sessions_since(entry["date"], now, _history_candles.get(symbol))
+            if entry
+            else None
         )
     return board
 
@@ -565,9 +604,38 @@ def _seconds_until_next_refresh(now=None):
     return (min(targets) - now).total_seconds()
 
 
+def _history_gap_symbols():
+    """Mã có tín hiệu cache nhưng THIẾU nến base (_history_candles) — fetch lỗi/
+    rỗng ở những lần refresh trước (rate-limit dai dẳng) khiến base không được
+    ghi, trong khi tín hiệu cũ vẫn giữ theo thiết kế. Không có base → _live_signal
+    trả None → attach_signals kẹt ở tín hiệu cache cũ suốt phiên. (Bug HPX
+    06/07/2026: chart cắt BUY trong ngày nhưng panel vẫn SELL cache từ 24/04.)
+
+    Không đo phủ bằng _volumes như _coverage_gap: _volumes lưu vĩnh viễn từ các
+    lần fetch cũ nên mã đã mất base vẫn "trông như đã phủ"."""
+    return [s for s in _cache["signals"] if s not in _history_candles]
+
+
+def _seed_history_gap_pending():
+    """Nối mã gap (có tín hiệu, thiếu base) vào _pending — được _drain_pending
+    vét mỗi phút như mã rate-limit thường: fetch được là có base, live signal
+    sống lại ngay, không phải đợi refresh 15:05 hôm sau. Bỏ qua mã đã chờ sẵn."""
+    _pending.extend(s for s in _history_gap_symbols() if s not in _pending)
+
+
 async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
     """Sau mỗi lần refresh, cứ mỗi phút retry nhóm mã còn fetch lỗi (rate-limit)
-    cho tới khi _pending rỗng — để mã chưa có tín hiệu không phải đợi lịch hôm sau."""
+    cho tới khi _pending rỗng — để mã chưa có tín hiệu không phải đợi lịch hôm sau.
+
+    Trước khi vét, seed thêm mã có tín hiệu nhưng thiếu nến base (xem
+    _history_gap_symbols) để tự vá lỗ hổng "mù live". Nhóm này thường chỉ vài
+    mã lỗi sót nên mỗi lượt vét chỉ vài chục giây ở throttle 1.1s — không đáng
+    kể so với budget 60 req/phút, chấp nhận chạy cả trong phiên (chính trong
+    phiên mới cần live signal). KHÔNG seed trong QUIET_WINDOW (7h-9h): giữ
+    nguyên tắc không gọi vnstock trước giờ mở cửa; khởi động trong khung này
+    thì gap được vá ở lượt drain sau refresh 15:05."""
+    if not _in_quiet_window():
+        _seed_history_gap_pending()
     while _pending:
         await asyncio.sleep(sleep_s)
         await asyncio.to_thread(retry_pending_once)
