@@ -10,9 +10,14 @@ MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ENV_FILE = os.path.join(MODULE_DIR, ".env")
 
 
-def load_dotenv(path: str = DEFAULT_ENV_FILE) -> None:
+def load_dotenv(path: str | None = None) -> None:
     """Nạp biến môi trường từ .env, KHÔNG ghi đè env đã có (env thật của
-    deploy phải thắng file local). File thiếu/không đọc được → bỏ qua."""
+    deploy phải thắng file local). File thiếu/không đọc được → bỏ qua.
+
+    Default resolve LÚC GỌI (không bind lúc def) để test monkeypatch được
+    DEFAULT_ENV_FILE — cách ly test khỏi .env thật chứa creds."""
+    if path is None:
+        path = DEFAULT_ENV_FILE
     try:
         with open(path, encoding="utf-8-sig") as f:
             for raw_line in f:

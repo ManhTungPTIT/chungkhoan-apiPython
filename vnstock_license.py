@@ -12,11 +12,19 @@ from typing import Callable, Optional
 import envfile
 
 logger = logging.getLogger(__name__)
+# Project không cấu hình logging (root chỉ có lastResort in WARNING+), nên
+# tự gắn handler cho riêng logger này để dòng tier LUÔN hiện lúc khởi động —
+# đây là mục đích chính của module. Chỉ ảnh hưởng logger này, không đụng root.
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 
 def ensure_license(
     lc_init_fn: Optional[Callable] = None,
-    env_path: str = envfile.DEFAULT_ENV_FILE,
+    env_path: Optional[str] = None,
 ) -> Optional[dict]:
     """Verify license vnii, trả dict license info ({tier, ...}) hoặc None nếu lỗi.
 

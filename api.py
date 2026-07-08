@@ -31,10 +31,14 @@ import sector_service
 import signal_service
 import tick_hub
 import vn100_service
+import vnstock_license
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Xác thực license vnstock trả phí (vnii) TRƯỚC khi warm/refresh — log tier
+    # ngay đầu log khởi động. Lỗi/thiếu key không chặn app (rơi về Community).
+    vnstock_license.ensure_license()
     # Warm danh sÃƒÂ¡ch mÃƒÂ£ rÃ¡Â»â€¢ theo dÃƒÂµi + danh sÃƒÂ¡ch VN100 (cÃ¡Â»Â `vn100` trÃƒÂªn board)
     # lÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng (memoize). LÃ¡Â»â€”i cÃ…Â©ng khÃƒÂ´ng sao Ã¢â‚¬â€ request /vn100 Ã„â€˜Ã¡ÂºÂ§u tiÃƒÂªn sÃ¡ÂºÂ½
     # tÃ¡Â»Â± thÃ¡Â»Â­ lÃ¡ÂºÂ¡i.

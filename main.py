@@ -21,6 +21,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 import data_source
 import vn100_service
+import vnstock_license
 
 
 def parse_args():
@@ -60,6 +61,7 @@ def display(interval: int, board, last_updated: str):
 
 def main():
     args = parse_args()
+    vnstock_license.ensure_license()
     print(f"Starting VN100 feed | interval={args.interval}s")
     print("Fetching first batch...")
 
