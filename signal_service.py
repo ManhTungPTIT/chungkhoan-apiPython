@@ -1,4 +1,4 @@
-"""Tín hiệu mua/bán Trend (SMA20 + MACD) cho rổ VN100 — tính nền, cache file.
+﻿"""Tín hiệu mua/bán Trend (SMA20 + MACD) cho rổ VN100 — tính nền, cache file.
 
 Nến *ngày* chỉ đổi tối đa 1 lần/phiên (lúc đóng cửa) nên lịch sử được fetch chậm
 (throttle) 1 lần/ngày, tính tín hiệu cuối mỗi mã rồi cache ra JSON. Endpoint
@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -173,6 +174,43 @@ def _macd_values(closes):
     return [ema12[m + 14] - ema26[m] for m in range(len(ema26))]
 
 
+def _candle_date(time_value):
+    """Ngày ISO (giờ VN) của 1 nến. `time` trong candles LUÔN là epoch giây
+    (xem data_source._map_history/_history_time_to_unix_seconds) — không phải
+    chuỗi ngày sẵn. Bug 2026-07-08: compute_signals từng str() thẳng epoch,
+    lưu date hỏng kiểu '1782061200' khiến _trading_sessions_since tính T+ sai
+    (fromisoformat parse nhầm ngày cổ hoặc ném ValueError)."""
+    return datetime.fromtimestamp(_normalize_candle_time(time_value), VN_TZ).date().isoformat()
+
+
+def _normalize_candle_time(time_value):
+    """Chuẩn hóa time nến về epoch giây."""
+    if isinstance(time_value, (int, float)):
+        if math.isnan(time_value):
+            raise ValueError("invalid candle time")
+        value = float(time_value)
+        if value > 10_000_000_000:
+            value /= 1000
+        return int(value)
+    if isinstance(time_value, str):
+        raw = time_value.strip()
+        if not raw:
+            raise ValueError("empty candle time")
+        if _EPOCH_DATE_RE.match(raw):
+            value = int(raw)
+            if value > 10_000_000_000:
+                value //= 1000
+            return value
+        text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=VN_TZ)
+        else:
+            parsed = parsed.astimezone(VN_TZ)
+        return int(parsed.timestamp())
+    raise ValueError("invalid candle time")
+
+
 def compute_signals(candles):
     """Máy trạng thái flat↔long. candles: list dict {time, high, low, close}.
 
@@ -196,7 +234,7 @@ def compute_signals(candles):
                 signals.append(
                     {
                         "signal": "buy",
-                        "date": str(candles[i]["time"]),
+                        "date": _candle_date(candles[i]["time"]),
                         "price": candles[i]["low"],  # neo ở giá thấp nhất nến
                     }
                 )
@@ -205,7 +243,7 @@ def compute_signals(candles):
             signals.append(
                 {
                     "signal": "sell",
-                    "date": str(candles[i]["time"]),
+                    "date": _candle_date(candles[i]["time"]),
                     "price": candles[i]["high"],  # neo ở giá cao nhất nến
                 }
             )
@@ -279,7 +317,7 @@ def _to_candles(raw):
         try:
             out.append(
                 {
-                    "time": r["time"],
+                    "time": _normalize_candle_time(r["time"]),
                     "high": float(r["high"]),
                     "low": float(r["low"]),
                     "close": float(r["close"]),
@@ -304,13 +342,32 @@ def _read_cache_file(path):
     return None
 
 
+_EPOCH_DATE_RE = re.compile(r"^\d+$")
+
+
+def _repair_legacy_epoch_dates(signals):
+    """Sửa TẠI CHỖ các entry cache ghi trước bug 2026-07-08 (xem _candle_date):
+    `date` bị lưu nhầm dạng epoch giây str() thẳng (vd '1782061200'), toàn chữ
+    số — ISO thật luôn có '-' nên nhận diện an toàn. Mã có epoch không hợp lệ
+    (hiếm) → bỏ qua, giữ nguyên."""
+    for entry in signals.values():
+        raw_date = entry.get("date") if isinstance(entry, dict) else None
+        if isinstance(raw_date, str) and _EPOCH_DATE_RE.match(raw_date):
+            try:
+                entry["date"] = _candle_date(int(raw_date))
+            except (OverflowError, OSError, ValueError):
+                pass
+
+
 def load_cache():
     """Nạp cache runtime (CACHE_FILE); thiếu/hỏng → fallback seed commit sẵn
     (SEED_FILE) để cold start có signal ngay; cả hai hỏng → rỗng (self-heal ở
-    lần refresh sau)."""
+    lần refresh sau). Tự sửa các date epoch hỏng còn sót từ trước fix (xem
+    _repair_legacy_epoch_dates) — không đợi mã đó có tín hiệu mới mới tự lành."""
     global _cache, _volumes
     data = _read_cache_file(CACHE_FILE) or _read_cache_file(SEED_FILE)
     if data:
+        _repair_legacy_epoch_dates(data["signals"])
         _cache = {"last_refresh": data.get("last_refresh"), "signals": data["signals"]}
         _volumes = data.get("volumes") or {}
     else:
@@ -339,7 +396,13 @@ def load_history_cache():
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         data = None
-    _history_candles = data if isinstance(data, dict) else {}
+    _history_candles = {}
+    if isinstance(data, dict):
+        for symbol, candles in data.items():
+            if isinstance(candles, list):
+                normalized = _to_candles(candles)
+                if normalized:
+                    _history_candles[symbol] = normalized
     return _history_candles
 
 
@@ -489,11 +552,14 @@ PRICE_BOARD_SCALE = 1000
 
 def _live_candle(row, today):
     """Nến hôm nay từ 1 row board (giá real-time), quy về đơn vị nghìn đồng như nến
-    lịch sử. None nếu thiếu OHLC (vd row test tối giản chỉ có price) → khỏi ghép,
-    dùng tín hiệu cache."""
+    lịch sử. `time` phải là epoch giây như MỌI nến khác trong hệ thống (xem
+    _candle_date) — không phải chuỗi ngày, để so sánh/format nhất quán với base
+    candles (_merge_today, _phantom_candle, compute_signals). None nếu thiếu
+    OHLC/ngày hỏng (vd row test tối giản chỉ có price) → khỏi ghép, dùng tín
+    hiệu cache."""
     try:
         return {
-            "time": today,
+            "time": int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=VN_TZ).timestamp()),
             "high": float(row["high"]) / PRICE_BOARD_SCALE,
             "low": float(row["low"]) / PRICE_BOARD_SCALE,
             "close": float(row["close"]) / PRICE_BOARD_SCALE,
@@ -504,8 +570,9 @@ def _live_candle(row, today):
 
 def _merge_today(base, live):
     """Ghép nến hôm nay vào base: cùng ngày với nến cuối → thay thế (nến đang cập
-    nhật); ngày mới → nối thêm. Không sửa base gốc."""
-    if base and str(base[-1]["time"])[:10] == str(live["time"])[:10]:
+    nhật); ngày mới → nối thêm. Không sửa base gốc. Cả 2 phía đều epoch giây
+    (xem _live_candle) nên so ngày qua _candle_date, không string-slice thô."""
+    if base and _candle_date(base[-1]["time"]) == _candle_date(live["time"]):
         return base[:-1] + [live]
     return base + [live]
 
@@ -522,7 +589,7 @@ def _phantom_candle(last, live, today):
         (sáng sớm chưa mở cửa, ngày nghỉ lễ giữa tuần).
     Nghỉ lễ giữa tuần mà giá board lệch nhẹ so với nến lịch sử (điều chỉnh cổ
     tức...) vẫn lọt qua kiểm tra trùng — hiếm, chấp nhận sai số này."""
-    if str(last["time"])[:10] == today:
+    if _candle_date(last["time"]) == today:
         return False  # cùng ngày → _merge_today thay thế nến cuối, không nối
     if date.fromisoformat(today).weekday() >= 5:
         return True
@@ -562,11 +629,17 @@ def attach_signals(board, now=None):
     Không tính được live (thiếu base/OHLC) → fallback tín hiệu cache _cache["signals"].
     Dùng key có tiền tố `signal_` để không đè `price`/giá hiện tại của board. `now`
     cho test bơm ngày cố định; mặc định lấy ngày hiện tại (giờ VN)."""
-    today = (now or datetime.now(VN_TZ)).date().isoformat()
+    current = now or datetime.now(VN_TZ)
+    today = current.date().isoformat()
     sigs = _cache["signals"]
     for row in board:
         symbol = row.get("symbol")
-        entry = _live_signal(symbol, row, today) or sigs.get(symbol)
+        cached = sigs.get(symbol)
+        live = _live_signal(symbol, row, today)
+        if live and live.get("date") == today and _is_market_hours(current):
+            entry = cached
+        else:
+            entry = live or cached
         row["signal"] = entry["signal"] if entry else None
         row["signal_date"] = entry["date"] if entry else None
         row["signal_price"] = entry["price"] if entry else None

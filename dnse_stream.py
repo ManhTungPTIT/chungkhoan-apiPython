@@ -28,6 +28,8 @@ import signal_service
 
 logger = logging.getLogger(__name__)
 
+MODULE_DIR = os.path.dirname(__file__)
+
 AUTH_URL = "https://services.entrade.com.vn/dnse-user-service/api/auth"
 ME_URL = "https://services.entrade.com.vn/dnse-user-service/api/me"
 BROKER_HOST = "datafeed-lts.dnse.com.vn"
@@ -36,15 +38,36 @@ BROKER_WS_PATH = "/wss"
 # Tick khớp lệnh của TẤT CẢ cổ phiếu trong một subscription (wildcard +)
 TICK_TOPIC = "plaintext/quotes/stock/tick/+"
 
-DEFAULT_CREDS_FILE = os.path.join(os.path.dirname(__file__), "dnse_creds.yaml")
+DEFAULT_ENV_FILE = os.path.join(MODULE_DIR, ".env")
+DEFAULT_CREDS_FILE = os.path.join(MODULE_DIR, "dnse_creds.yaml")
 
 FIRST_RECONNECT_DELAY_S = 1
 MAX_RECONNECT_DELAY_S = 60
 
+def _load_dotenv(path=DEFAULT_ENV_FILE):
+    """Nap bien moi truong tu .env canh module, khong ghi de env da co."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("\"'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
 
 def load_creds():
     """(username, password) từ env DNSE_USER/DNSE_PASSWORD, không có thì đọc
     yaml {usr, pwd} tại DNSE_CREDS_FILE. Thiếu/không đọc được → None."""
+    _load_dotenv()
     user = os.environ.get("DNSE_USER")
     password = os.environ.get("DNSE_PASSWORD")
     if user and password:

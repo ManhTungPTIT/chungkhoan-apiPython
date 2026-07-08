@@ -100,7 +100,11 @@ def fetch_vn100_board(
 
     if df is None or getattr(df, "empty", False):
         return []
-    return _map_board(df)
+    try:
+        return _map_board(df)
+    except BaseException as e:  # noqa: BLE001 - map shape/data errors are fetch failures
+        logger.warning("price_board map that bai: %s", _short(e), exc_info=True)
+        return None
 
 
 def fetch_all_symbols(
@@ -132,7 +136,11 @@ def fetch_market_bid_ask(
 
     if df is None or getattr(df, "empty", False):
         return []
-    return _map_bid_ask(df)
+    try:
+        return _map_bid_ask(df)
+    except BaseException as e:  # noqa: BLE001 - map shape/data errors are fetch failures
+        logger.warning("price_board map bid/ask that bai: %s", _short(e), exc_info=True)
+        return None
 
 
 def fetch_market_snapshot(
@@ -156,7 +164,11 @@ def fetch_market_snapshot(
 
     if df is None or getattr(df, "empty", False):
         return {"board": [], "bid_ask": []}
-    return {"board": _map_board(df), "bid_ask": _map_bid_ask(df)}
+    try:
+        return {"board": _map_board(df), "bid_ask": _map_bid_ask(df)}
+    except BaseException as e:  # noqa: BLE001 - map shape/data errors are fetch failures
+        logger.warning("price_board map snapshot that bai: %s", _short(e), exc_info=True)
+        return None
 
 
 def _map_bid_ask(df) -> list[dict]:

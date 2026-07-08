@@ -323,7 +323,7 @@ def _run_step(step):
     try:
         step()
     except BaseException as e:  # noqa: BLE001 Ã¢â‚¬â€ cÃ¡Â»â€˜ ÃƒÂ½ bÃ¡ÂºÂ¯t cÃ¡ÂºÂ£ SystemExit
-        logger.warning("refresh step %s thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i: %s", step.__name__, e)
+        logger.warning("refresh step %s thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i: %s", step.__name__, e, exc_info=True)
 
 
 def refresh_all():
