@@ -629,17 +629,15 @@ def attach_signals(board, now=None):
     Không tính được live (thiếu base/OHLC) → fallback tín hiệu cache _cache["signals"].
     Dùng key có tiền tố `signal_` để không đè `price`/giá hiện tại của board. `now`
     cho test bơm ngày cố định; mặc định lấy ngày hiện tại (giờ VN)."""
-    current = now or datetime.now(VN_TZ)
-    today = current.date().isoformat()
+    today = (now or datetime.now(VN_TZ)).date().isoformat()
     sigs = _cache["signals"]
     for row in board:
         symbol = row.get("symbol")
-        cached = sigs.get(symbol)
-        live = _live_signal(symbol, row, today)
-        if live and live.get("date") == today and _is_market_hours(current):
-            entry = cached
-        else:
-            entry = live or cached
+        # Ưu tiên tín hiệu LIVE (ghép giá hôm nay vào base nến) để tín hiệu cắt
+        # TRONG PHIÊN hiện ngay, không đợi 15:05. Nến hôm nay còn hình thành nên
+        # tín hiệu có thể lật lại nếu giá đảo chiều trước giờ đóng cửa (whipsaw) —
+        # chấp nhận đánh đổi này để panel phản ánh diễn biến thực trong phiên.
+        entry = _live_signal(symbol, row, today) or sigs.get(symbol)
         row["signal"] = entry["signal"] if entry else None
         row["signal_date"] = entry["date"] if entry else None
         row["signal_price"] = entry["price"] if entry else None

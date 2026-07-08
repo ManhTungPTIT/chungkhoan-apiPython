@@ -26,7 +26,9 @@ def test_load_history_cache_normalizes_legacy_string_times(tmp_path, monkeypatch
     assert signal_service._candle_date(loaded["AAA"][0]["time"]) == "2024-11-28"
 
 
-def test_attach_signals_ignores_unconfirmed_live_signal_during_market_hours(monkeypatch):
+def test_attach_signals_shows_live_signal_during_market_hours(monkeypatch):
+    """Tín hiệu cắt TRONG PHIÊN (live phát hôm nay) hiện ngay ở panel, không đợi
+    15:05 — ưu tiên live hơn tín hiệu cache cũ dù nến hôm nay còn hình thành."""
     signal_service._cache = {
         "last_refresh": "2026-07-08",
         "signals": {"NVL": {"signal": "sell", "date": "2026-05-06", "price": 16.37}},
@@ -45,5 +47,5 @@ def test_attach_signals_ignores_unconfirmed_live_signal_during_market_hours(monk
         now=datetime(2026, 7, 8, 10, 0, tzinfo=signal_service.VN_TZ),
     )
 
-    assert rows[0]["signal"] == "sell"
-    assert rows[0]["signal_date"] == "2026-05-06"
+    assert rows[0]["signal"] == "buy"
+    assert rows[0]["signal_date"] == "2026-07-08"
