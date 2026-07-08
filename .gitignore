@@ -5,3 +5,4 @@ __pycache__/
 .pytest.ini
 test/
 board_vn100_cache.json
+dnse_creds.yaml

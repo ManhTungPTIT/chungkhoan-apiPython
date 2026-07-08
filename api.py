@@ -12,21 +12,24 @@ BaseException nÃƒÂªn endpoint khÃƒÂ´ng bao giÃ¡Â»Â trÃ¡ÂºÂ£
 
 import asyncio
 import io
+import json
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+import dnse_stream
 import homepage_service
 import market_cache
 import market_refresher
 import sector_service
 import signal_service
+import tick_hub
 import vn100_service
 
 
@@ -49,6 +52,11 @@ async def lifespan(app: FastAPI):
     # LuÃ¡Â»â€œng refresh nÃ¡Â»Ân cho snapshot thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng dÃƒÂ¹ng chung (board VN100 + toÃƒÂ n TT +
     # nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh). TÃ¡Â»Â± warm ngay khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng Ã¢â€ â€™ trang cÃƒÂ³ nÃ¡Â»â„¢i dung dÃ¡Â»Â±ng sÃ¡ÂºÂµn.
     asyncio.create_task(market_refresher.scheduler_loop())
+    # Nguồn realtime DNSE: 1 kết nối MQTT nền cho cả hệ thống, đẩy tick đã
+    # normalize vào hub để /ws/quotes fan-out theo mã. Thiếu creds → bỏ qua
+    # (log cảnh báo), FE tự fallback poll /quotes 5s — server vẫn sống.
+    tick_hub.hub.set_loop(asyncio.get_running_loop())
+    dnse_stream.start_stream(tick_hub.hub.publish)
     yield
 
 
@@ -155,9 +163,56 @@ def get_homepage_market_depth():
 
 @app.get("/api/python/homepage/market-breadth")
 def get_homepage_market_breadth():
-    
+
     snap = market_cache.get_snapshot("market_wide")
     if snap:
         return snap["breadth"]
     return homepage_service.get_market_breadth()
+
+
+@app.websocket("/api/python/ws/quotes")
+async def ws_quotes(websocket: WebSocket):
+    """Stream quote realtime theo mã. Client gửi
+    {"action":"subscribe"|"unsubscribe","symbol":"FPT"}; server đẩy MỖI quote
+    MỘT message JSON {symbol, price, time, volume?}. Lệnh sai/JSON hỏng → bỏ
+    qua, GIỮ kết nối. Coalesce ở tick_hub, nhịp đẩy tối đa FLUSH_INTERVAL_S.
+    """
+    await websocket.accept()
+    # Đọc hub tại thời điểm gọi (test monkeypatch tick_hub.hub từng test một).
+    hub = tick_hub.hub
+    # TestClient không chạy lifespan → set loop "lười" ở đây; chạy thật thì
+    # lifespan đã set cùng loop nên gọi lại vô hại (idempotent).
+    hub.set_loop(asyncio.get_running_loop())
+    sub = hub.connect()
+
+    async def sender():
+        while True:
+            for quote in await hub.drain(sub):
+                await websocket.send_json(quote)
+            await asyncio.sleep(tick_hub.FLUSH_INTERVAL_S)
+
+    send_task = asyncio.create_task(sender())
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            symbol = msg.get("symbol")
+            if not isinstance(symbol, str) or not symbol:
+                continue
+            if msg.get("action") == "subscribe":
+                hub.subscribe(sub, symbol)
+            elif msg.get("action") == "unsubscribe":
+                hub.unsubscribe(sub, symbol)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        send_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await send_task
+        hub.disconnect(sub)
 

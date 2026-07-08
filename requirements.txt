@@ -12,6 +12,11 @@ vnii==0.2.4
 fastapi
 uvicorn[standard]
 
+# stream realtime DNSE (dnse_stream.py) — MQTT over WebSocket + creds yaml
+paho-mqtt
+PyYAML
+requests
+
 # dev / test
 pytest
 pytest-asyncio
