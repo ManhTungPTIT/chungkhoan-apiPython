@@ -1,0 +1,32 @@
+"""Nạp biến môi trường từ file .env cạnh project.
+
+Dùng chung cho dnse_stream (creds DNSE) và vnstock_license (VNSTOCK_API_KEY)
+— không kéo thêm dependency python-dotenv chỉ cho việc này.
+"""
+
+import os
+
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_ENV_FILE = os.path.join(MODULE_DIR, ".env")
+
+
+def load_dotenv(path: str = DEFAULT_ENV_FILE) -> None:
+    """Nạp biến môi trường từ .env, KHÔNG ghi đè env đã có (env thật của
+    deploy phải thắng file local). File thiếu/không đọc được → bỏ qua."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("\"'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
