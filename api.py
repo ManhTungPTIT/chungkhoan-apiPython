@@ -212,7 +212,13 @@ async def ws_quotes(websocket: WebSocket):
         pass
     finally:
         send_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await send_task
-        hub.disconnect(sub)
+        try:
+            with suppress(asyncio.CancelledError):
+                await send_task
+        except Exception:
+            # sender chết vì lỗi gửi (client rớt giữa chừng) cũng phải dọn sub,
+            # không để Subscription mồ côi trong hub
+            pass
+        finally:
+            hub.disconnect(sub)
 
