@@ -52,3 +52,74 @@ def ensure_license(
     tier = info.get("tier") if isinstance(info, dict) else info
     logger.info("vnstock license OK — tier=%s", tier)
     return info
+
+
+VNSTOCK_DATA_VERSION = "3.2.3"
+
+
+def _download_and_install_vnii_package(package_name: str, version: str) -> bool:
+    """Tải + cài 1 gói proprietary qua API vnii, KHÔNG dùng
+    vnii.install_package()/download_and_install() tiện lợi có sẵn — 2 hàm đó
+    đặt tên file tải về mặc định là "<package>.whl" khi response API thiếu
+    field 'filename', nhưng nội dung thật lại là GZIP TARBALL (magic bytes
+    \\x1f\\x8b, không phải PK/zip của wheel) → pip từ chối với lỗi "is not a
+    valid wheel filename"/"is invalid" (verify thủ công 09/07/2026 với
+    vnstock_data 3.2.3). Đây là bug phía vnii, không phải nhầm lẫn ở phía
+    project — sửa bằng cách tự đặt lại đuôi .tar.gz (sdist) trước khi gọi
+    PackageManager.install_package(), pip cài sdist bình thường."""
+    from vnii.packages import PackageManager
+    from vnii.utils import get_vnstock_directory
+
+    pm = PackageManager(get_vnstock_directory())
+    path = pm.download_package(package_name, version)
+    fixed = path.parent / f"{package_name}-{version}.tar.gz"
+    path = path.rename(fixed)
+    return pm.install_package(path)
+
+
+def ensure_vnstock_data(
+    import_fn: Optional[Callable] = None,
+    install_fn: Optional[Callable] = None,
+    version: str = VNSTOCK_DATA_VERSION,
+) -> bool:
+    """Đảm bảo vnstock_data (gói sponsor proprietary) import được, tự tải+cài
+    nếu thiếu. Trả True nếu sẵn sàng, False nếu không (data_source sẽ lỗi khi
+    gọi thật — không chặn app khởi động, tự retry ở request kế nếu deploy có
+    mạng lại).
+
+    vnstock_data KHÔNG cài được qua pip — không nằm trên bất kỳ index nào,
+    kể cả --extra-index-url của vnstocks.com. Nó là gói proprietary chỉ tải
+    qua API của vnii bằng API key (đã nạp bởi ensure_license() gọi trước hàm
+    này). requirements.txt vì vậy KHÔNG được pin vnstock_data.
+
+    Gọi hàm này ở container startup (không phải build time) để tái dùng
+    VNSTOCK_API_KEY runtime có sẵn — không cần thêm secret build-time riêng."""
+    if import_fn is None:
+        import importlib
+
+        import_fn = lambda: importlib.import_module("vnstock_data")  # noqa: E731
+
+    try:
+        import_fn()
+        return True
+    except ImportError:
+        pass
+
+    if install_fn is None:
+        install_fn = _download_and_install_vnii_package
+
+    try:
+        ok = install_fn(package_name="vnstock_data", version=version)
+    except BaseException as e:  # noqa: BLE001 — vnii có thể ném SystemExit
+        logger.warning("cai vnstock_data that bai (%s) — data_source se loi khi goi", e)
+        return False
+
+    if not ok:
+        logger.warning("cai vnstock_data that bai — data_source se loi khi goi")
+        return False
+
+    import importlib
+
+    importlib.invalidate_caches()
+    logger.info("vnstock_data da san sang (moi cai, version=%s)", version)
+    return True

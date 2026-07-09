@@ -6,15 +6,17 @@
 # Pin bản cụ thể: @main không pin khiến prod kéo bản khác local → đổi shape
 # symbols_by_industries làm hỏng heatmap/sectors. 4.0.4 là bản đã verify.
 vnstock==4.0.4
-# data_source.py gọi API qua vnstock_data (KHÔNG phải vnstock) — chỉ gọi qua
-# vnstock_data mới thực sự áp dụng rate-limit tier sponsor đã mua (Golden 500
-# req/phút thay vì Community 60). Gọi qua `vnstock` dù có API key hợp lệ vẫn
-# chỉ chạy Community — đã verify bằng cảnh báo "PHÁT HIỆN NGƯỜI DÙNG ĐÃ CÀI
-# THƯ VIỆN SPONSOR" của chính gói vnstock khi phát hiện dùng nhầm import cũ.
-vnstock_data==3.2.3
 # Xác thực tier sponsor lúc khởi động (vnstock_license.ensure_license, xem
 # vnai TIER_LIMITS). Thiếu gói này thì API key chỉ được tính Community 60 req/phút.
 vnii==0.2.4
+# KHÔNG pin vnstock_data ở đây — nó KHÔNG phải gói pip (không nằm trên bất kỳ
+# index nào kể cả --extra-index-url trên). Đây là gói .bin proprietary chỉ tải
+# được qua vnii.install_package() bằng API key lúc RUNTIME (xem
+# vnstock_license.ensure_vnstock_data(), gọi ở container startup — api.py
+# lifespan / main.py). data_source.py gọi API qua vnstock_data (KHÔNG phải
+# vnstock) vì chỉ gọi qua vnstock_data mới thực sự áp dụng rate-limit tier
+# sponsor đã mua (Golden 500 req/phút thay vì Community 60 khi gọi nhầm qua
+# `vnstock`).
 fastapi
 uvicorn[standard]
 
