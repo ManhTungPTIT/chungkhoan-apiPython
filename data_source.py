@@ -13,32 +13,35 @@ VN_TZ = dt.timezone(dt.timedelta(hours=7))
 
 
 def _default_listing():
-    from vnstock import Listing
+    from vnstock_data import Listing
 
-    # Rá»• theo dÃµi = VNALL (VNAllShare, 300 mÃ£ HOSE â€” HOSE khÃ´ng cÃ³ "VN300"
-    # chÃ­nh thá»©c) + toÃ n sÃ n HNX (~293 mÃ£, Ä‘á»ƒ phá»§ cÃ¡c mÃ£ nhÆ° MBS/IVS/API).
-    # Dedupe giá»¯ thá»© tá»±. Má»™t trong hai lá»i gá»i lá»—i â†’ cáº£ fetch lá»—i (caller tráº£
-    # None, thá»­ láº¡i sau) â€” trÃ¡nh memoize rá»• thiáº¿u ná»­a sÃ n.
-    listing = Listing()
-    vnall = listing.symbols_by_group("VNALL").tolist()
-    hnx = listing.symbols_by_group("HNX").tolist()
-    return list(dict.fromkeys(vnall + hnx))
+    # Rổ theo dõi = CỔ PHIẾU (type=="STOCK") trên cả 3 sàn HOSE + HNX + UPCOM,
+    # để phủ cả mã thanh khoản cao trên UPCOM (VD: OIL). Dùng symbols_by_exchange
+    # (KHÔNG dùng symbols_by_group("VNALL"/"HNX")) — group "VNALL"/"HNX" bị vỡ
+    # qua vnstock_data: "HNX" bị _VCI_INDEX_MAPPING nuốt trước thành mã chỉ số
+    # 'HNXIndex' (sai), "VNALL" map sang 'VNALLSHARE' nhưng backend VCI trả JSON
+    # rỗng cho group này. Lọc type=="STOCK" để loại CW/ETF/FU/UNIT_TRUST — các
+    # loại này cũng mang exchange HSX/HNX/UPCOM nên lọt qua nếu chỉ lọc exchange
+    # (bug đã gặp: mã "41I1G7000" là CW lẫn vào, không phải cổ phiếu).
+    df = Listing(source=VCI).symbols_by_exchange()
+    mask = df["exchange"].isin(["HSX", "HNX", "UPCOM"]) & (df["type"] == "STOCK")
+    return df.loc[mask, "symbol"].tolist()
 
 
 def _default_price_board(symbols: list[str]):
-    from vnstock import Trading
+    from vnstock_data import Trading
 
     return Trading(symbol=symbols[0], source=VCI).price_board(symbols)
 
 
 def _default_all_listing():
-    from vnstock import Listing
+    from vnstock_data import Listing
 
     return Listing(source=VCI).all_symbols()["symbol"].tolist()
 
 
 def _default_history(symbol: str, start: str, end: str, interval: str = "1D"):
-    from vnstock.api.quote import Quote
+    from vnstock_data import Quote
 
     return Quote(symbol=symbol, source=VCI).history(
         start=start, end=end, interval=interval
@@ -46,7 +49,7 @@ def _default_history(symbol: str, start: str, end: str, interval: str = "1D"):
 
 
 def _default_industries():
-    from vnstock import Listing
+    from vnstock_data import Listing
 
     # Nguá»“n VCI cung cáº¥p phÃ¢n cáº¥p ICB Ä‘áº§y Ä‘á»§; nguá»“n máº·c Ä‘á»‹nh (KBS) chá»‰ tá»›i cáº¥p 2.
     return Listing(source=VCI).symbols_by_industries()
@@ -67,9 +70,9 @@ def fetch_vn100_symbols(
 
 
 def _default_vn100_members_listing():
-    from vnstock import Listing
+    from vnstock_data import Listing
 
-    return Listing().symbols_by_group("VN100").tolist()
+    return Listing(source=VCI).symbols_by_group("VN100").tolist()
 
 
 def fetch_vn100_members(
