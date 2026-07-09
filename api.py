@@ -39,6 +39,12 @@ async def lifespan(app: FastAPI):
     # Xác thực license vnstock trả phí (vnii) TRƯỚC khi warm/refresh — log tier
     # ngay đầu log khởi động. Lỗi/thiếu key không chặn app (rơi về Community).
     vnstock_license.ensure_license()
+    # vnstock_data.core.utils.env.idv() (chạy lúc IMPORT vnstock_data) đòi
+    # ~/.vnstock/user.json tồn tại với field "user" khác rỗng — file này bình
+    # thường do vnstock_installer tạo lúc cài tương tác, container/CI không
+    # có bước đó nên PHẢI tự tạo trước, nếu không import vnstock_data crash
+    # (SystemExit "Không tìm thấy thông tin người dùng hợp lệ").
+    vnstock_license.ensure_user_profile()
     # vnstock_data không cài được qua pip (xem requirements.txt) — tự tải+cài
     # ở đây bằng API key vừa xác thực, TRƯỚC khi data_source gọi lần đầu.
     vnstock_license.ensure_vnstock_data()

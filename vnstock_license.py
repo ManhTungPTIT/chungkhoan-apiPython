@@ -6,7 +6,10 @@ vnii tìm key theo thứ tự: env VNSTOCK_API_KEY → ~/.vnstock/api_key.json.
 vnstock vẫn chạy nhưng bị giới hạn tier Community 60 req/phút (Golden: 500).
 """
 
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Callable, Optional
 
 import envfile
@@ -123,3 +126,34 @@ def ensure_vnstock_data(
     importlib.invalidate_caches()
     logger.info("vnstock_data da san sang (moi cai, version=%s)", version)
     return True
+
+
+def ensure_user_profile(path: Optional[str] = None) -> bool:
+    """Đảm bảo ~/.vnstock/user.json tồn tại với field "user" khác rỗng.
+
+    vnstock_data.core.utils.env.idv() (gọi lúc IMPORT vnstock_data, ở
+    connector/explorer __init__.py) raise SystemExit "Không tìm thấy thông
+    tin người dùng hợp lệ" nếu thiếu file này hoặc field "user" rỗng — đây là
+    kiểm tra THUẦN CLIENT-SIDE, không phải license/quota/server (verify
+    09/07/2026: response HTTP mọi API call đều 200, lỗi không xuất hiện
+    trong bất kỳ response nào — lỗi raise trực tiếp trong code vnstock_data
+    trước khi kịp gọi mạng lấy dữ liệu thật).
+
+    File này bình thường do vnstock_installer tạo lúc cài đặt TƯƠNG TÁC —
+    container/CI không chạy bước đó nên thiếu. Gọi hàm này trước
+    ensure_vnstock_data() ở container startup. Không ghi đè file đã có (để
+    không mất dữ liệu profile thật nếu deploy có sẵn)."""
+    if path is None:
+        path = str(Path.home() / ".vnstock" / "user.json")
+
+    if os.path.exists(path):
+        return True
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"user": "vnstock_realtime"}, f)
+        return True
+    except OSError as e:
+        logger.warning("khong tao duoc user.json (%s) — import vnstock_data se loi", e)
+        return False
