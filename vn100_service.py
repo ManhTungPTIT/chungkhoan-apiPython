@@ -8,18 +8,52 @@ là 1 request `price_board` cho toàn bộ mã. Fetch hỏng (rate-limit/mạng)
 {data: []}.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import data_source
 
 VALUE_THRESHOLD = 1_000_000_000
+VN_TZ = timezone(timedelta(hours=7))
 
 _symbols: list[str] = []
 
 _vn100_members: list[str] = []
 
+# Carry-over cho /vn100 (build_board): đầu phiên hầu hết mã chưa kịp đạt
+# VALUE_THRESHOLD của HÔM NAY nên danh sách rất ngắn dù tín hiệu vẫn tính được
+# (attach_signals không phụ thuộc value). _prev_day_symbols giữ danh sách ĐÃ
+# ĐẠT NGƯỠNG của phiên gần nhất, hợp cùng mã đạt ngưỡng hôm nay để hiển thị đủ
+# ngay từ đầu phiên, tự thay bằng dữ liệu thật khi mã đó có giao dịch. Chỉ RAM,
+# không cần sống sót qua restart.
+_today_accum_symbols: set[str] = set()
+_today_accum_date: str | None = None
+_prev_day_symbols: set[str] = set()
+
 
 def _process(board: list[dict]) -> list[dict]:
     """Lọc giá trị giao dịch > 1 tỷ, sắp theo value giảm dần."""
     filtered = [x for x in board if (x.get("value") or 0) > VALUE_THRESHOLD]
+    return sorted(filtered, key=lambda x: x["value"] or 0, reverse=True)
+
+
+def _process_with_carryover(board: list[dict], now=None) -> list[dict]:
+    """Như _process nhưng hợp thêm danh sách đã đạt ngưỡng của phiên trước
+    (_prev_day_symbols) — chỉ dùng cho build_board (/vn100), KHÔNG dùng cho
+    build_power_board/get_active_symbols để không đổi hành vi các trang khác."""
+    global _today_accum_symbols, _today_accum_date, _prev_day_symbols
+    today = (now or datetime.now(VN_TZ)).strftime("%Y-%m-%d")
+    if _today_accum_date != today:
+        _prev_day_symbols = _today_accum_symbols
+        _today_accum_symbols = set()
+        _today_accum_date = today
+
+    qualified_today = {
+        x["symbol"] for x in board if (x.get("value") or 0) > VALUE_THRESHOLD
+    }
+    _today_accum_symbols |= qualified_today
+
+    eligible = qualified_today | _prev_day_symbols
+    filtered = [x for x in board if x["symbol"] in eligible]
     return sorted(filtered, key=lambda x: x["value"] or 0, reverse=True)
 
 
@@ -67,9 +101,9 @@ def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
     return [x["symbol"] for x in _process(board)]
 
 
-def build_board(board: list[dict]) -> dict:
-    """Dựng payload /vn100 từ board ĐÃ fetch sẵn: lọc value + sort + gắn cờ VN100
-    + gắn tín hiệu.
+def build_board(board: list[dict], now=None) -> dict:
+    """Dựng payload /vn100 từ board ĐÃ fetch sẵn: lọc value (kèm carry-over
+    phiên trước, xem _process_with_carryover) + sort + gắn cờ VN100 + gắn tín hiệu.
 
     Tách khỏi get_board để market_refresher fetch board 1 lần rồi tái dùng cho
     nhiều view (vn100/sectors/heatmap) — không gọi price_board lại.
@@ -83,7 +117,7 @@ def build_board(board: list[dict]) -> dict:
     import signal_service
 
     members = set(get_vn100_members())
-    rows = _process(board)
+    rows = _process_with_carryover(board, now=now)
     for row in rows:
         row["vn100"] = row["symbol"] in members
     return {"data": signal_service.attach_signals(rows)}
