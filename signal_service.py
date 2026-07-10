@@ -278,36 +278,48 @@ def _weekday_sessions(start, today):
 
 
 def _trading_sessions_since(signal_date, now=None, candles=None):
-    """Số phiên giao dịch đã trôi từ ngày báo tới hôm nay (giờ VN).
+    """Số phiên giao dịch đã MỞ (đạt giờ mở cửa) kể từ SAU ngày báo tới hiện tại (giờ VN).
 
-    Có `candles` (nến lịch sử của mã, thời gian tăng dần) phủ ngày báo → đếm số
-    nến trong [ngày báo, hôm nay): nến chỉ tồn tại ở phiên giao dịch thật nên tự
-    loại T7/CN LẪN ngày nghỉ lễ, không cần bảng lịch nghỉ. Nến chưa phủ tới sát
-    hôm nay (cache cũ sau vài ngày service ngừng) → phần đuôi sau nến cuối bù
-    bằng đếm ngày thường. Thiếu nến / nến không phủ ngày báo (lịch sử bị cắt
-    ngắn) → fallback đếm ngày thường T2–T6 (chấp nhận sai số nhỏ quanh lễ).
+    Ngày báo KHÔNG được tính. Một phiên chỉ được cộng khi đã tới giờ mở cửa
+    (>= MARKET_OPEN_HOUR): phiên HÔM NAY trước 09:00 chưa +1, từ 09:00 mới +1 —
+    nên sáng sớm (trước phiên) T+ giữ nguyên số của phiên trước, không nhảy lúc
+    nửa đêm như bản cũ đếm theo lịch.
 
-    Báo hôm qua (ngày thường) → 1, báo thứ Sáu xem thứ Hai → 1, báo hôm nay /
-    ngày báo ở tương lai → 0. Ngày báo không hợp lệ / rỗng → None."""
+    Có `candles` (nến lịch sử phủ ngày báo, thời gian tăng dần) → đếm số nến nằm
+    HẲN giữa ngày báo và hôm nay (start < d < today): nến chỉ tồn tại ở phiên
+    giao dịch thật nên tự loại T7/CN LẪN ngày nghỉ lễ, không cần bảng lịch nghỉ.
+    Nến chưa phủ tới sát hôm nay (cache cũ sau vài ngày service ngừng) → phần
+    đuôi sau nến cuối bù bằng đếm ngày thường. Thiếu nến / nến không phủ ngày báo
+    (lịch sử bị cắt ngắn) → fallback đếm ngày thường T2–T6 (chấp nhận sai số nhỏ
+    quanh lễ). Cả hai nhánh cộng thêm phiên HÔM NAY nếu đã mở cửa.
+
+    Báo hôm qua (ngày thường), xem sau 09:00 → 1, trước 09:00 → 0; báo thứ Sáu
+    xem thứ Hai sau 09:00 → 1; báo hôm nay / ngày báo ở tương lai → 0. Ngày báo
+    không hợp lệ / rỗng → None."""
     if not signal_date:
         return None
     try:
         start = date.fromisoformat(str(signal_date)[:10])
     except ValueError:
         return None
-    today = (now or datetime.now(VN_TZ)).date()
+    now = now or datetime.now(VN_TZ)
+    today = now.date()
     if start >= today:
         return 0
+    # Phiên HÔM NAY chỉ tính khi đã tới giờ mở cửa (>= 09:00) và là ngày thường —
+    # đây chính là chỗ "trước phiên chưa +1, sau phiên mới +1".
+    opened_today = 1 if (now.weekday() < 5 and now.hour >= MARKET_OPEN_HOUR) else 0
+    day_after_start = start + timedelta(days=1)
     if candles:
         try:
             dates = [date.fromisoformat(str(c["time"])[:10]) for c in candles]
         except (KeyError, TypeError, ValueError):
             dates = []
         if dates and dates[0] <= start:
-            count = sum(1 for d in dates if start <= d < today)
-            tail = max(dates[-1] + timedelta(days=1), start)
-            return count + _weekday_sessions(tail, today)
-    return _weekday_sessions(start, today)
+            count = sum(1 for d in dates if start < d < today)
+            tail = max(dates[-1] + timedelta(days=1), day_after_start)
+            return count + _weekday_sessions(tail, today) + opened_today
+    return _weekday_sessions(day_after_start, today) + opened_today
 
 
 def _to_candles(raw):
@@ -619,10 +631,13 @@ def attach_signals(board, now=None):
       signal          — "buy"/"sell"/None
       signal_date     — ngày phát tín hiệu (None nếu chưa có)
       signal_price    — giá tại điểm tín hiệu (None nếu chưa có)
-      signal_sessions — số phiên giao dịch từ ngày báo tới HÔM NAY (0 = báo hôm nay,
-                        None nếu chưa có tín hiệu) — tính động theo _trading_sessions_since
-                        để luôn đúng theo ngày hiện tại, không đóng băng theo nến cuối;
-                        đếm theo nến base của mã nên tự loại T7/CN và ngày nghỉ lễ.
+      signal_sessions — số phiên đã MỞ (đạt 09:00) từ SAU ngày báo tới HIỆN TẠI
+                        (0 = báo hôm nay HOẶC sáng hôm sau trước giờ mở, None nếu chưa
+                        có tín hiệu) — tính động theo _trading_sessions_since để luôn
+                        đúng theo giờ hiện tại; đếm theo nến base nên tự loại T7/CN và lễ.
+      signal_hold     — True khi tín hiệu là buy nhưng đã qua ngày báo (pha "nắm giữ").
+                        Cần riêng vì signal_sessions=0 cho CẢ ngày báo lẫn sáng hôm sau
+                        trước giờ mở → không suy được BUY/HOLD từ số phiên.
 
     Ưu tiên tín hiệu LIVE: ghép giá hôm nay (OHLC real-time trong row) vào base nến
     lịch sử rồi tính lại → tín hiệu cắt trong phiên hiện ngay, không phải đợi 15:05.
@@ -645,6 +660,12 @@ def attach_signals(board, now=None):
             _trading_sessions_since(entry["date"], now, _history_candles.get(symbol))
             if entry
             else None
+        )
+        # Pha "nắm giữ": đã báo MUA nhưng đã qua ngày báo (hôm nay khác ngày báo).
+        # Tách khỏi signal_sessions vì phiên hôm nay trước 09:00 có sessions=0
+        # GIỐNG ngày báo — FE không thể phân biệt BUY/HOLD từ số phiên nữa.
+        row["signal_hold"] = bool(
+            entry and entry["signal"] == "buy" and entry["date"] != today
         )
     return board
 
