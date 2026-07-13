@@ -8,7 +8,7 @@
 vnstock==4.0.4
 # Xác thực tier sponsor lúc khởi động (vnstock_license.ensure_license, xem
 # vnai TIER_LIMITS). Thiếu gói này thì API key chỉ được tính Community 60 req/phút.
-vnii==0.2.4
+vnii==0.2.5
 # KHÔNG pin vnstock_data ở đây — nó KHÔNG phải gói pip (không nằm trên bất kỳ
 # index nào kể cả --extra-index-url trên). Đây là gói .bin proprietary chỉ tải
 # được qua vnii.install_package() bằng API key lúc RUNTIME (xem
