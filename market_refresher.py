@@ -1,18 +1,21 @@
-"""LuÃ¡Â»â€œng nÃ¡Â»Ân refresh cÃƒÂ¡c snapshot dÃƒÂ¹ng chung vÃƒÂ o market_cache.
+"""Luồng nền refresh các snapshot dùng chung vào market_cache.
 
-CHÃ¡Â»Ë† luÃ¡Â»â€œng nÃƒÂ y gÃ¡Â»Âi vnstock cho dÃ¡Â»Â¯ liÃ¡Â»â€¡u chung Ã¢â€ â€™ sÃ¡Â»â€˜ call khÃƒÂ´ng phÃ¡Â»Â¥ thuÃ¡Â»â„¢c sÃ¡Â»â€˜ user.
-ChÃ¡ÂºÂ¡y qua asyncio.to_thread (vnstock lÃƒÂ  call Ã„â€˜Ã¡Â»â€œng bÃ¡Â»â„¢) Ã„â€˜Ã¡Â»Æ’ khÃƒÂ´ng chÃ¡ÂºÂ·n event loop,
-theo Ã„â€˜ÃƒÂºng pattern signal_service.scheduler_loop.
+CHỈ luồng này gọi vnstock cho dữ liệu chung → số call không phụ thuộc số user.
+Chạy qua asyncio.to_thread (vnstock là call đồng bộ) để không chặn event loop,
+theo đúng pattern signal_service.scheduler_loop.
 
-NgÃƒÂ¢n sÃƒÂ¡ch trong giÃ¡Â»Â GD: tick 5s Ãƒâ€” (1 price_board toÃƒÂ n TT + 1 history nÃ¡ÂºÂ¿n 1D
-VNINDEX cho /quotes) = 24 call/phÃƒÂºt Ã¢â‚¬â€ tick thÃ†Â°Ã¡Â»Âng chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes
-(/quotes); mÃ¡Â»â€”i tick thÃ¡Â»Â© 4 (~20s) tÃƒÂ¡i dÃƒÂ¹ng CÃƒâ„¢NG lÃ¡ÂºÂ§n fetch Ã„â€˜ÃƒÂ³ dÃ¡Â»Â±ng thÃƒÂªm views
-market_wide + warm nÃ¡ÂºÂ¿n VNINDEX (3 call/phÃƒÂºt). Danh sÃƒÂ¡ch mÃƒÂ£ (all_symbols)
-memoize theo ngÃƒÂ y Ã¢â€¡â€™ tÃ¡Â»â€¢ng ~28 call/phÃƒÂºt (dÃ†Â°Ã¡Â»â€ºi 60).
-Board VN100 (price_board rÃ¡Â»â€¢ VNALL+HNX) KHÃƒâ€NG chÃ¡ÂºÂ¡y mÃ¡Â»â€”i chu kÃ¡Â»Â³ mÃƒÂ  giÃƒÂ£n ~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n
-(BOARD_VN100_INTERVAL_S) Ã¢â‚¬â€ sectors + heatmap Ã„â€˜Ã¡Â»â€¢i chÃ¡ÂºÂ­m, khÃƒÂ´ng cÃ¡ÂºÂ§n 20s. RiÃƒÂªng view
-/vn100 (bÃ¡ÂºÂ£ng giÃƒÂ¡ + signal) Ã„â€˜Ã†Â°Ã¡Â»Â£c dÃ¡Â»Â±ng lÃ¡ÂºÂ¡i mÃ¡Â»â€”i ~20s tÃ¡Â»Â« board toÃƒÂ n TT cÃ¡Â»Â§a
-market_wide (_vn100_view) Ã„â€˜Ã¡Â»Æ’ signal cÃ¡ÂºÂ¯t trong phiÃƒÂªn khÃƒÂ´ng bÃ¡Â»â€¹ Ã„â€˜ÃƒÂ³ng bÃ„Æ’ng theo giÃ¡Â»Â.
+Ngân sách trong giờ GD: tick 1s × (1 price_board toàn TT + 1 history nến 1D
+VNINDEX cho /quotes) = 120 call/phút — tick thường chỉ cập nhật snapshot quotes
+(/quotes); mỗi tick thứ 20 (~20s) tái dùng CÙNG lần fetch đó dựng thêm views
+market_wide + warm nến VNINDEX (3 call/phút, KHÔNG đổi so với bản 5s trước —
+vẫn giữ nhịp 20s). Tổng ~123 call/phút — dưới hạn Golden 500 req/phút, nhưng
+VƯỢT hạn Community 60 req/phút (chấp nhận được vì project chạy tier Golden,
+xem vnstock_license; nếu rớt về Community phải tăng lại QUOTES_INTERVAL_S).
+Danh sách mã (all_symbols) memoize theo ngày, không tính vào ngân sách trên.
+Board VN100 (price_board rổ VNALL+HNX) KHÔNG chạy mỗi chu kỳ mà giãn ~1 tiếng/lần
+(BOARD_VN100_INTERVAL_S) — sectors + heatmap đổi chậm, không cần 20s. Riêng view
+/vn100 (bảng giá + signal) được dựng lại mỗi ~20s từ board toàn TT của
+market_wide (_vn100_view) để signal cắt trong phiên không bị đóng băng theo giờ.
 """
 
 import asyncio
@@ -34,9 +37,9 @@ logger = logging.getLogger(__name__)
 
 VN_TZ = timezone(timedelta(hours=7))
 
-QUOTES_INTERVAL_S = 5      # tick nhanh trong giÃ¡Â»Â GD: cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes
-VIEWS_EVERY_TICKS = 4      # mÃ¡Â»â€”i tick thÃ¡Â»Â© 4 (4Ãƒâ€”5s = 20s) dÃ¡Â»Â±ng thÃƒÂªm views nÃ¡ÂºÂ·ng
-REALTIME_INTERVAL_S = QUOTES_INTERVAL_S * VIEWS_EVERY_TICKS  # nhÃ¡Â»â€¹p views (nhÃ†Â° cÃ…Â© 20s)
+QUOTES_INTERVAL_S = 5      # tick nhanh trong giờ GD: cập nhật snapshot quotes
+VIEWS_EVERY_TICKS = 20     # mỗi tick thứ 20 (20×1s = 20s) dựng thêm views nặng
+REALTIME_INTERVAL_S = QUOTES_INTERVAL_S * VIEWS_EVERY_TICKS  # nhịp views (giữ ~20s như cũ)
 IDLE_INTERVAL_S = 300      # ngoÃƒÂ i giÃ¡Â»Â: vÃ¡ÂºÂ«n refresh thÃ†Â°a Ã„â€˜Ã¡Â»Æ’ cÃƒÂ³ giÃƒÂ¡ Ã„â€˜ÃƒÂ³ng cÃ¡Â»Â­a mÃ¡Â»â€ºi nhÃ¡ÂºÂ¥t
 MARKET_OPEN_HOUR = 9
 MARKET_CLOSE_HOUR = 15     # tÃ¡Â»â€ºi 15:00 (giÃ¡Â»Â VN)
@@ -262,14 +265,14 @@ def _vn100_view(board):
 
 
 def refresh_tick(build_views=True):
-    """1 request price_board(toÃƒÂ n TT) mÃ¡Â»â€”i tick Ã¢â€ â€™ LUÃƒâ€N cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot `quotes`
-    (giÃƒÂ¡ + KL khÃ¡Â»â€ºp real-time cho /quotes, nhÃ¡Â»â€¹p 5s trong giÃ¡Â»Â GD).
+    """1 request price_board(toàn TT) mỗi tick → LUÔN cập nhật snapshot `quotes`
+    (giá + KL khớp real-time cho /quotes, nhịp 1s trong giờ GD).
 
-    build_views=True (mÃ¡Â»â€”i tick thÃ¡Â»Â© VIEWS_EVERY_TICKS ~20s, lÃƒÂºc warm, vÃƒÂ  ngoÃƒÂ i
-    giÃ¡Â»Â) dÃ¡Â»Â±ng thÃƒÂªm snapshot `market_wide`: breadth + depth + top-volume + power
-    + vn100 (bÃ¡ÂºÂ£ng giÃƒÂ¡ kÃƒÂ¨m signal live, xem _vn100_view) Ã¢â‚¬â€ tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tÃ¡Â»Â« CÃƒâ„¢NG mÃ¡Â»â„¢t
-    lÃ¡ÂºÂ§n fetch, khÃƒÂ´ng call vnstock thÃƒÂªm. Fetch lÃ¡Â»â€”i Ã¢â€ â€™ Ã„â€˜ÃƒÂ¡nh dÃ¡ÂºÂ¥u stale cÃ¡ÂºÂ£ hai,
-    giÃ¡Â»Â¯ bÃ¡ÂºÂ£n tÃ¡Â»â€˜t gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t (last-good)."""
+    build_views=True (mỗi tick thứ VIEWS_EVERY_TICKS ~20s, lúc warm, và ngoài
+    giờ) dựng thêm snapshot `market_wide`: breadth + depth + top-volume + power
+    + vn100 (bảng giá kèm signal live, xem _vn100_view) — tất cả từ CÙNG một
+    lần fetch, không call vnstock thêm. Fetch lỗi → đánh dấu stale cả hai,
+    giữ bản tốt gần nhất (last-good)."""
     symbols = _all_symbols_today()
     if not symbols:
         market_cache.set_snapshot("quotes", None, ok=False)
@@ -350,8 +353,8 @@ def _quotes_tick():
 
 
 def refresh_quotes_only():
-    """Tick nhanh 5s trong giÃ¡Â»Â GD: chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t snapshot quotes (1 call
-    price_board). DÃƒÂ¹ng chung khÃƒÂ³a vÃ¡Â»â€ºi refresh_all Ã„â€˜Ã¡Â»Æ’ khÃƒÂ´ng fetch chÃ¡Â»â€œng."""
+    """Tick nhanh 1s trong giờ GD: chỉ cập nhật snapshot quotes (1 call
+    price_board). Dùng chung khóa với refresh_all để không fetch chồng."""
     if not _refresh_lock.acquire(blocking=False):
         logger.info("market refresh Ã„â€˜ang chÃ¡ÂºÂ¡y Ã¢â‚¬â€ bÃ¡Â»Â qua tick quotes")
         return
@@ -362,11 +365,11 @@ def refresh_quotes_only():
 
 
 async def scheduler_loop():
-    """Warm ngay lÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng rÃ¡Â»â€œi chÃ¡ÂºÂ¡y tick: trong giÃ¡Â»Â GD ngÃ¡Â»Â§ 5s/tick Ã¢â‚¬â€ tick
-    thÃ†Â°Ã¡Â»Âng chÃ¡Â»â€° cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t quotes, mÃ¡Â»â€”i tick thÃ¡Â»Â© VIEWS_EVERY_TICKS (~20s) chÃ¡ÂºÂ¡y
-    refresh_all (views + warm nÃ¡ÂºÂ¿n + board_vn100 tÃ¡Â»â€ºi hÃ¡ÂºÂ¡n); ngoÃƒÂ i giÃ¡Â»Â giÃƒÂ£n 300s,
-    mÃ¡Â»â€”i lÃ†Â°Ã¡Â»Â£t chÃ¡ÂºÂ¡y full refresh_all (quotes vÃ¡ÂºÂ«n Ã„â€˜Ã†Â°Ã¡Â»Â£c cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t kÃƒÂ¨m Ã¢â‚¬â€ giÃƒÂ¡ Ã„â€˜ÃƒÂ³ng
-    cÃ¡Â»Â­a, khÃƒÂ´ng cÃ¡ÂºÂ§n nhÃ¡Â»â€¹p nhanh)."""
+    """Warm ngay lúc khởi động rồi chạy tick: trong giờ GD ngủ 1s/tick — tick
+    thường chỉ cập nhật quotes, mỗi tick thứ VIEWS_EVERY_TICKS (~20s) chạy
+    refresh_all (views + warm nến + board_vn100 tới hạn); ngoài giờ giãn 300s,
+    mỗi lượt chạy full refresh_all (quotes vẫn được cập nhật kèm — giá đóng
+    cửa, không cần nhịp nhanh)."""
     await asyncio.to_thread(refresh_all)
     tick = 0
     while True:

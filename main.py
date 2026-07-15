@@ -6,11 +6,19 @@ Cách dùng:
 CLI này dùng lại cùng đường lấy dữ liệu với API (data_source + vn100_service),
 tức gọi gộp `price_board` 1 request cho cả nhóm VN100 thay vì fan-out 100 request.
 Tự làm mới theo chu kỳ cho đến khi nhấn Ctrl+C.
+
+Mode thứ 2 — kiểm tra tick realtime qua WebSocket (không đi qua data_source,
+gọi thẳng endpoint /api/python/ws/quotes như 1 client thật, server phải đang
+chạy sẵn — vd `uvicorn api:app --port 8808`):
+    python main.py --ws --symbols FPT,OIL
+    python main.py --ws --symbols FPT --host ws://<production-host>/api/python/ws/quotes
 """
 
 import argparse
+import asyncio
 import datetime
 import io
+import json
 import os
 import sys
 import time
@@ -23,13 +31,40 @@ import data_source
 import vn100_service
 import vnstock_license
 
+DEFAULT_WS_HOST = "ws://127.0.0.1:8808/api/python/ws/quotes"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VN100 board viewer (terminal)")
     parser.add_argument(
         "--interval", type=int, default=60, help="Seconds between refreshes (default: 60)"
     )
+    parser.add_argument(
+        "--ws", action="store_true", help="Mode kiểm tra tick realtime qua WebSocket thay vì bảng VN100"
+    )
+    parser.add_argument(
+        "--symbols", default="", help="Danh sách mã cách nhau bằng dấu phẩy, vd FPT,OIL (dùng với --ws)"
+    )
+    parser.add_argument(
+        "--host", default=DEFAULT_WS_HOST, help=f"WebSocket URL (mặc định {DEFAULT_WS_HOST})"
+    )
     return parser.parse_args()
+
+
+async def run_ws(host: str, symbols: list[str]):
+    """Connect tới /ws/quotes như client thật, subscribe symbols, in mỗi tick nhận
+    được ra terminal kèm giờ nhận (không phải giờ trong tick) để thấy độ trễ."""
+    import websockets
+
+    print(f"Ket noi {host} ...", flush=True)
+    async with websockets.connect(host) as ws:
+        for sym in symbols:
+            await ws.send(json.dumps({"action": "subscribe", "symbol": sym}))
+        print(f"Da subscribe: {symbols or '(khong co — se khong nhan tick nao)'}", flush=True)
+        print("Cho tick... (Ctrl+C de dung)\n", flush=True)
+        async for raw in ws:
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[{now}] {raw}", flush=True)
 
 
 def fetch_board():
@@ -61,6 +96,12 @@ def display(interval: int, board, last_updated: str):
 
 def main():
     args = parse_args()
+    if args.ws:
+        # Mode WS là client thuần (gọi qua HTTP/WS tới server đang chạy sẵn),
+        # không đụng data_source/vnstock nên KHÔNG cần ensure_license/vnstock_data.
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        asyncio.run(run_ws(args.host, symbols))
+        return
     vnstock_license.ensure_license()
     vnstock_license.ensure_user_profile()
     vnstock_license.ensure_vnstock_data()

@@ -1,211 +1,269 @@
-"""Kết nối nguồn realtime DNSE LightSpeed (MQTT over WebSocket) — MỘT kết nối
-cho cả hệ thống, nhận tick khớp lệnh mọi mã rồi đẩy vào tick_hub để endpoint
-/ws/quotes phân phối cho từng user theo mã họ subscribe.
+"""Nguồn realtime DNSE — LightSpeed API **V2** (OpenAPI) qua SDK chính thức `dnse`.
 
-Xác thực bằng TÀI KHOẢN DNSE (không phải API key vnstock): đăng nhập lấy JWT
-(hiệu lực ~8 tiếng) + investorId; MQTT username=investorId, password=JWT.
-JWT hết hạn → broker ngắt → vòng kết nối tự đăng nhập lại lấy JWT mới rồi nối
-lại với backoff (không giữ client cũ vì password đã chết).
+V1 (MQTT `datafeed-lts.dnse.com.vn`, login username/password, topic
+`plaintext/quotes/stock/tick/+`) ĐÃ BỊ DNSE NGỪNG HỖ TRỢ → broker trả SUBACK
+"Not authorized" cho mọi topic ⇒ không nhận được tick. V2 dùng WebSocket
+`wss://ws-openapi.dnse.com.vn`, xác thực bằng **API key/secret** (HMAC-SHA256).
+SDK (`pip install dnse-sdk-openapi`) tự lo reconnect + heartbeat + re-subscribe.
 
-Credentials nằm NGOÀI git: env DNSE_USER/DNSE_PASSWORD, hoặc file yaml
-(DNSE_CREDS_FILE, mặc định dnse_creds.yaml cạnh module — format {usr, pwd}
-giống connector dnse của vnstock_data). Thiếu creds → start_stream() không
-chạy gì, log cảnh báo; FE tự fallback về poll /quotes 5s.
+Một kết nối cho cả hệ thống. Endpoint /ws/quotes gọi want()/unwant() theo mã FE
+đang xem (v2 KHÔNG có wildcard — phải subscribe theo danh sách mã cụ thể). Tick
+đã normalize được đẩy vào tick_hub để phân phối cho từng user theo mã họ đăng ký.
+
+Credentials NGOÀI git: env DNSE_API_KEY/DNSE_API_SECRET, hoặc file yaml
+(DNSE_CREDS_FILE, mặc định dnse_creds.yaml cạnh module — format {api_key,
+api_secret}). Thiếu creds → start_stream() không chạy, log cảnh báo; FE tự
+fallback về poll /quotes.
 """
 
-import datetime as dt
-import json
+import asyncio
 import logging
 import os
-import random
-import threading
 import time
 
-import requests
 import yaml
 
 import envfile
-import signal_service
 
 logger = logging.getLogger(__name__)
 
 MODULE_DIR = os.path.dirname(__file__)
-
-AUTH_URL = "https://services.entrade.com.vn/dnse-user-service/api/auth"
-ME_URL = "https://services.entrade.com.vn/dnse-user-service/api/me"
-BROKER_HOST = "datafeed-lts.dnse.com.vn"
-BROKER_PORT = 443
-BROKER_WS_PATH = "/wss"
-# Tick khớp lệnh của TẤT CẢ cổ phiếu trong một subscription (wildcard +)
-TICK_TOPIC = "plaintext/quotes/stock/tick/+"
-
 DEFAULT_CREDS_FILE = os.path.join(MODULE_DIR, "dnse_creds.yaml")
 
-FIRST_RECONNECT_DELAY_S = 1
-MAX_RECONNECT_DELAY_S = 60
+# Mã chỉ số đi qua kênh `market_index` (khác cổ phiếu đi kênh `tick`/trades).
+# Danh sách các index DNSE phát; FE mặc định mở VNINDEX.
+INDEX_SYMBOLS = {
+    "VNINDEX",
+    "VN30",
+    "VN100",
+    "HNXINDEX",
+    "HNX30",
+    "UPCOMINDEX",
+    "VNXALLSHARE",
+}
 
-def load_creds():
-    """(username, password) từ env DNSE_USER/DNSE_PASSWORD, không có thì đọc
-    yaml {usr, pwd} tại DNSE_CREDS_FILE. Thiếu/không đọc được → None."""
+
+def load_api_creds():
+    """(api_key, api_secret) từ env DNSE_API_KEY/DNSE_API_SECRET, không có thì đọc
+    yaml {api_key, api_secret} tại DNSE_CREDS_FILE. Thiếu/không đọc được → None."""
     envfile.load_dotenv()
-    user = os.environ.get("DNSE_USER")
-    password = os.environ.get("DNSE_PASSWORD")
-    if user and password:
-        return user, password
+    api_key = os.environ.get("DNSE_API_KEY")
+    api_secret = os.environ.get("DNSE_API_SECRET")
+    if api_key and api_secret:
+        return api_key, api_secret
 
     path = os.environ.get("DNSE_CREDS_FILE", DEFAULT_CREDS_FILE)
     try:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return data["usr"], data["pwd"]
+        return data["api_key"], data["api_secret"]
     except (OSError, TypeError, KeyError, yaml.YAMLError) as e:
         logger.info("khong nap duoc creds DNSE (%s): %s", path, e)
         return None
 
 
-def _tick_time_to_unix_seconds(value):
-    """Tick DNSE có thể mang time dạng epoch giây, epoch mili-giây hoặc chuỗi
-    ISO — chuẩn hóa về unix giây. Không parse được → None (bỏ tick)."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        v = float(value)
-        return int(v / 1000) if v > 1e12 else int(v)
-    if isinstance(value, str):
-        try:
-            return int(dt.datetime.fromisoformat(value).timestamp())
-        except ValueError:
-            return None
-    return None
+def is_index(symbol):
+    """Mã có phải chỉ số không (định tuyến kênh market_index vs trades)."""
+    return str(symbol or "").upper() in INDEX_SYMBOLS
 
 
-def normalize_tick(payload):
-    """Tick DNSE → quote chuẩn của hệ thống, CÙNG shape với /quotes:
-    {symbol, price (nghìn đồng — matchPrice VND / PRICE_BOARD_SCALE),
-     volume (KL cộng dồn phiên, bỏ qua nếu thiếu), time (unix giây)}.
-    Tick thiếu/hỏng field bắt buộc hoặc giá <= 0 → None."""
-    if not isinstance(payload, dict):
+def _to_unix_seconds(received_at):
+    """SDK gắn receivedAt = epoch giây (float) lúc nhận message. Thiếu → 'bây giờ'
+    (tick là realtime nên khớp khung nến theo đồng hồ tường)."""
+    try:
+        return int(float(received_at))
+    except (TypeError, ValueError):
+        return int(time.time())
+
+
+def _extract_volume(raw):
+    """KL cộng dồn phiên → int; thiếu/NaN thì bỏ qua (quote không kèm volume)."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
         return None
-    symbol = payload.get("symbol")
+    if v != v:  # NaN
+        return None
+    return int(v)
+
+
+def normalize_trade(trade):
+    """SDK Trade (kênh tick — cổ phiếu) → quote chuẩn CÙNG shape với /quotes:
+    {symbol, price, time, volume?}. price ĐÃ ở nghìn đồng (v2 KHÔNG cần chia
+    PRICE_BOARD_SCALE như v1). Thiếu symbol / giá <= 0 → None."""
+    symbol = getattr(trade, "symbol", None)
     if not isinstance(symbol, str) or not symbol:
         return None
     try:
-        price = float(payload.get("matchPrice"))
+        price = float(getattr(trade, "price", None))
     except (TypeError, ValueError):
         return None
     if not (price > 0):  # loại luôn NaN (NaN > 0 là False)
         return None
-    tick_time = _tick_time_to_unix_seconds(payload.get("time"))
-    if tick_time is None:
-        return None
 
     quote = {
         "symbol": symbol.upper(),
-        "price": price / signal_service.PRICE_BOARD_SCALE,
-        "time": tick_time,
+        "price": price,
+        "time": _to_unix_seconds(getattr(trade, "receivedAt", None)),
     }
-    try:
-        volume = float(payload.get("volume"))
-        if volume == volume:  # not NaN
-            quote["volume"] = int(volume)
-    except (TypeError, ValueError):
-        pass
+    volume = _extract_volume(getattr(trade, "totalVolumeTraded", None))
+    if volume is not None:
+        quote["volume"] = volume
     return quote
 
 
-def _dnse_login(user, password):
-    """Đăng nhập DNSE → (investor_id, jwt). Lỗi HTTP → raise để vòng kết nối
-    backoff rồi thử lại."""
-    resp = requests.post(
-        AUTH_URL,
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({"username": user, "password": password}),
-        timeout=15,
-    )
-    resp.raise_for_status()
-    token = resp.json()["token"]
-    me = requests.get(
-        ME_URL,
-        headers={"Content-Type": "application/json", "authorization": f"Bearer {token}"},
-        timeout=15,
-    )
-    me.raise_for_status()
-    return me.json()["investorId"], token
+def normalize_index(index):
+    """SDK MarketIndex (kênh market_index — chỉ số) → quote chuẩn. price =
+    valueIndexes (đơn vị ĐIỂM, khớp nến /intraday của index, KHÔNG scale).
+    Thiếu tên / giá trị <= 0 → None."""
+    name = getattr(index, "indexName", None)
+    if not isinstance(name, str) or not name:
+        return None
+    try:
+        price = float(getattr(index, "valueIndexes", None))
+    except (TypeError, ValueError):
+        return None
+    if not (price > 0):
+        return None
+
+    quote = {
+        "symbol": name.upper(),
+        "price": price,
+        "time": _to_unix_seconds(getattr(index, "receivedAt", None)),
+    }
+    volume = _extract_volume(getattr(index, "totalVolumeTraded", None))
+    if volume is not None:
+        quote["volume"] = volume
+    return quote
 
 
-def _run_stream_forever(user, password, on_quote, stop_event):
-    """Vòng đời kết nối: login → MQTT connect → loop tới khi rớt → backoff →
-    login lại (JWT mới). Mỗi chu kỳ tạo client MỚI vì JWT cũ có thể đã hết hạn."""
-    from paho.mqtt import client as mqtt_client  # import trễ: test offline không cần paho
-    from paho.mqtt.client import MQTTv5
-    from paho.mqtt.subscribeoptions import SubscribeOptions
+# ===== quản lý kết nối + subscribe động =====
 
-    delay = FIRST_RECONNECT_DELAY_S
-    while not stop_event.is_set():
+_client = None
+_lock = asyncio.Lock()
+_refcounts = {}  # symbol (hoa) -> số WS client đang xem
+
+
+def _channels_for(symbol):
+    """Kênh SDK cần unsubscribe cho một mã (đối xứng với subscribe)."""
+    if is_index(symbol):
+        return [f"market_index.{symbol}.json"]
+    from dnse.websocket.client import DEFAULT_BOARDS
+
+    return [f"tick.{board}.json" for board in DEFAULT_BOARDS]
+
+
+async def _subscribe_symbol(symbol):
+    """Đăng ký một mã trên SDK. Handler đã gắn 1 lần ở start_stream nên truyền
+    callback None (chỉ mở kênh, không gắn thêm handler → tránh gọi trùng)."""
+    if _client is None:
+        return
+    try:
+        if is_index(symbol):
+            await _client.subscribe_market_index(symbol)
+        else:
+            await _client.subscribe_trades([symbol])
+    except Exception as e:  # noqa: BLE001 — lỗi 1 mã không được làm sập stream
+        logger.warning("DNSE subscribe %s loi: %s", symbol, e)
+
+
+async def _unsubscribe_symbol(symbol):
+    if _client is None:
+        return
+    symbols = [] if is_index(symbol) else [symbol]
+    for channel in _channels_for(symbol):
         try:
-            investor_id, token = _dnse_login(user, password)
+            await _client.unsubscribe(channel, symbols)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DNSE unsubscribe %s loi: %s", symbol, e)
 
-            def on_connect(client, userdata, flags, rc, properties=None):
-                if rc == 0:
-                    logger.info("DNSE MQTT connected — subscribe %s", TICK_TOPIC)
-                    client.subscribe([(TICK_TOPIC, SubscribeOptions(qos=1))])
-                else:
-                    logger.warning("DNSE MQTT connect rc=%s", rc)
 
-            def on_message(client, userdata, msg):
-                try:
-                    quote = normalize_tick(json.loads(msg.payload.decode()))
-                except (ValueError, UnicodeDecodeError):
-                    return
-                if quote:
-                    on_quote(quote)
+async def want(symbol):
+    """FE bắt đầu xem `symbol` → tăng refcount, lần đầu (0→1) thì subscribe SDK.
+    Nếu client CHƯA connect xong, chỉ ghi refcount; start_stream sẽ subscribe lại
+    toàn bộ mã đang want sau khi connect (cũng phục vụ reconnect)."""
+    key = str(symbol or "").strip().upper()
+    if not key:
+        return
+    async with _lock:
+        n = _refcounts.get(key, 0)
+        _refcounts[key] = n + 1
+        if n == 0:
+            await _subscribe_symbol(key)
 
-            client = mqtt_client.Client(
-                client_id=f"vnstock-realtime-{random.randint(0, 100000)}",
-                protocol=MQTTv5,
-                transport="websockets",
-            )
-            client.username_pw_set(investor_id, token)
-            client.tls_set_context()
-            client.ws_set_options(path=BROKER_WS_PATH)
-            client.on_connect = on_connect
-            client.on_message = on_message
 
-            client.connect(BROKER_HOST, BROKER_PORT, keepalive=120)
-            delay = FIRST_RECONNECT_DELAY_S  # nối được → reset backoff
-            # loop_forever tự retry ở tầng TCP nhưng KHÔNG làm mới JWT; rớt hẳn
-            # (return/raise) thì ra ngoài để login lại với token mới.
-            client.loop_forever(retry_first_connection=False)
-        except Exception as e:  # noqa: BLE001 — lỗi mạng/auth nào cũng chỉ backoff rồi thử lại
-            logger.warning("DNSE stream loi: %s — thu lai sau %ss", e, delay)
-        if stop_event.is_set():
+async def unwant(symbol):
+    """FE rời `symbol` → giảm refcount, lần cuối (→0) thì unsubscribe SDK."""
+    key = str(symbol or "").strip().upper()
+    if not key:
+        return
+    async with _lock:
+        n = _refcounts.get(key, 0)
+        if n <= 0:
             return
-        time.sleep(delay)
-        delay = min(delay * 2, MAX_RECONNECT_DELAY_S)
+        if n > 1:
+            _refcounts[key] = n - 1
+            return
+        _refcounts.pop(key, None)
+        await _unsubscribe_symbol(key)
 
 
-_stream_thread = None
-_stop_event = threading.Event()
-
-
-def start_stream(on_quote):
-    """Chạy stream DNSE ở thread nền (daemon). Không có creds → log + bỏ qua
-    (hệ thống vẫn chạy với poll như cũ). Gọi lặp lại khi thread đang sống → bỏ qua."""
-    global _stream_thread
-    creds = load_creds()
+async def start_stream(publish):
+    """Mở kết nối SDK V2 + gắn handler tick/index. Không có creds → log + bỏ qua
+    (FE dùng poll). Gọi lặp khi đã có client → bỏ qua. Sau khi connect, subscribe
+    lại mọi mã đang want (WS client kết nối trước lúc connect xong, hoặc reconnect)."""
+    global _client
+    creds = load_api_creds()
     if not creds:
         logger.warning(
-            "DNSE_USER/DNSE_PASSWORD (hoac %s) chua co — bo qua stream realtime,"
+            "DNSE_API_KEY/DNSE_API_SECRET (hoac %s) chua co — bo qua stream realtime,"
             " FE dung fallback poll /quotes",
             os.environ.get("DNSE_CREDS_FILE", DEFAULT_CREDS_FILE),
         )
         return False
-    if _stream_thread is not None and _stream_thread.is_alive():
+    if _client is not None:
         return True
-    _stop_event.clear()
-    _stream_thread = threading.Thread(
-        target=_run_stream_forever,
-        args=(*creds, on_quote, _stop_event),
-        name="dnse-stream",
-        daemon=True,
-    )
-    _stream_thread.start()
+
+    from dnse import TradingClient
+
+    api_key, api_secret = creds
+    client = TradingClient(api_key, api_secret)
+
+    def on_trade(trade):
+        quote = normalize_trade(trade)
+        if quote:
+            publish(quote)
+
+    def on_index(index):
+        quote = normalize_index(index)
+        if quote:
+            publish(quote)
+
+    client.on("trade", on_trade)
+    client.on("market_index", on_index)
+
+    try:
+        await client.connect()
+    except Exception as e:  # noqa: BLE001 — connect/auth lỗi thì degrade về poll
+        logger.warning("DNSE v2 connect loi: %s — FE dung fallback poll /quotes", e)
+        return False
+
+    async with _lock:
+        _client = client
+        for key in list(_refcounts):
+            await _subscribe_symbol(key)
+    logger.info("DNSE v2 stream san sang (wss://ws-openapi.dnse.com.vn)")
     return True
+
+
+async def stop_stream():
+    """Đóng kết nối SDK + dọn state (dùng lúc shutdown)."""
+    global _client
+    client = _client
+    _client = None
+    _refcounts.clear()
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception as e:  # noqa: BLE001
+            logger.info("DNSE v2 disconnect loi (bo qua): %s", e)

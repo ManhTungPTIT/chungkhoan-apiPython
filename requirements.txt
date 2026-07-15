@@ -20,8 +20,17 @@ vnii==0.2.5
 fastapi
 uvicorn[standard]
 
-# stream realtime DNSE (dnse_stream.py) — MQTT over WebSocket + creds yaml
-paho-mqtt
+# stream realtime DNSE (dnse_stream.py) — LightSpeed API V2 (OpenAPI) qua SDK
+# chính thức: WebSocket wss://ws-openapi.dnse.com.vn, auth API key/secret. V1
+# (paho-mqtt) đã bị DNSE ngừng hỗ trợ.
+# LƯU Ý: dnse-sdk-openapi khai báo Requires RỖNG (không tự kéo dep) nhưng lúc
+# import cần msgpack + websockets + certifi → PHẢI liệt kê tường minh ở đây, nếu
+# không image sạch sẽ ModuleNotFoundError lúc chạy. (websockets vốn có qua
+# uvicorn[standard], certifi qua requests — vẫn ghi rõ để build không phụ thuộc.)
+dnse-sdk-openapi
+msgpack
+websockets
+certifi
 PyYAML
 requests
 

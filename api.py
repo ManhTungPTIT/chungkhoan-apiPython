@@ -69,8 +69,11 @@ async def lifespan(app: FastAPI):
     # normalize vào hub để /ws/quotes fan-out theo mã. Thiếu creds → bỏ qua
     # (log cảnh báo), FE tự fallback poll /quotes 5s — server vẫn sống.
     tick_hub.hub.set_loop(asyncio.get_running_loop())
-    dnse_stream.start_stream(tick_hub.hub.publish)
+    # SDK v2 là async → chạy như task trong loop (không block startup); connect
+    # lỗi/thiếu creds tự degrade về poll bên trong start_stream.
+    asyncio.create_task(dnse_stream.start_stream(tick_hub.hub.publish))
     yield
+    await dnse_stream.stop_stream()
 
 
 app = FastAPI(title="vnstock Realtime API", lifespan=lifespan)
@@ -217,10 +220,20 @@ async def ws_quotes(websocket: WebSocket):
             symbol = msg.get("symbol")
             if not isinstance(symbol, str) or not symbol:
                 continue
+            # want()/unwant() điều khiển subscribe SDK v2 theo nhu cầu (v2 không có
+            # wildcard). Chỉ gọi khi mã THỰC SỰ đổi trạng thái với sub này để
+            # refcount khớp với sub.symbols (subscribe/unsubscribe lặp không lệch).
+            key = symbol.upper()
             if msg.get("action") == "subscribe":
+                is_new = key not in sub.symbols
                 hub.subscribe(sub, symbol)
+                if is_new:
+                    await dnse_stream.want(key)
             elif msg.get("action") == "unsubscribe":
+                was_watching = key in sub.symbols
                 hub.unsubscribe(sub, symbol)
+                if was_watching:
+                    await dnse_stream.unwant(key)
     except WebSocketDisconnect:
         pass
     finally:
@@ -233,5 +246,8 @@ async def ws_quotes(websocket: WebSocket):
             # không để Subscription mồ côi trong hub
             pass
         finally:
+            # Rời mọi mã còn theo dõi để refcount SDK về 0 (unsubscribe khi hết xem).
+            for watched in list(sub.symbols):
+                await dnse_stream.unwant(watched)
             hub.disconnect(sub)
 
