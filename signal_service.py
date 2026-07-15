@@ -720,14 +720,18 @@ async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
     cho tới khi _pending rỗng — để mã chưa có tín hiệu không phải đợi lịch hôm sau.
 
     Trước khi vét, seed thêm mã có tín hiệu nhưng thiếu nến base (xem
-    _history_gap_symbols) để tự vá lỗ hổng "mù live". Nhóm này thường chỉ vài
-    mã lỗi sót nên mỗi lượt vét chỉ vài chục giây ở throttle 1.1s — không đáng
-    kể so với budget 60 req/phút, chấp nhận chạy cả trong phiên (chính trong
-    phiên mới cần live signal). KHÔNG seed trong QUIET_WINDOW (7h-9h): giữ
-    nguyên tắc không gọi vnstock trước giờ mở cửa; khởi động trong khung này
-    thì gap được vá ở lượt drain sau refresh 15:05."""
+    _history_gap_symbols) VÀ mã lẻ mới lọt active trong phiên, chưa từng fetch
+    (xem _newly_active_symbols — vd tăng trần đột biến, _coverage_gap không
+    bắt được vì chỉ vài mã lẻ giữa 1 rổ đã covered) để tự vá lỗ hổng "mù live".
+    Nhóm này thường chỉ vài mã lỗi sót/mới nổi nên mỗi lượt vét chỉ vài chục
+    giây ở throttle 1.1s — không đáng kể so với budget rate-limit, chấp nhận
+    chạy cả trong phiên (chính trong phiên mới cần live signal). KHÔNG seed
+    trong QUIET_WINDOW (7h-9h): giữ nguyên tắc không gọi vnstock trước giờ mở
+    cửa; khởi động trong khung này thì gap được vá ở lượt drain sau refresh
+    15:05."""
     if not _in_quiet_window():
         _seed_history_gap_pending()
+        _seed_newly_active_pending()
     while _pending:
         await asyncio.sleep(sleep_s)
         await asyncio.to_thread(retry_pending_once)
@@ -747,6 +751,24 @@ def _coverage_gap(active_fn=None):
         return False
     covered = sum(1 for s in active if s in _volumes)
     return covered < len(active) * COVERAGE_MIN_RATIO
+
+
+def _newly_active_symbols(active_fn=None):
+    """Mã đang active (value > ngưỡng) nhưng CHƯA TỪNG fetch (vắng trong
+    _volumes) — mã lẻ mới lần đầu lọt ngưỡng TRONG PHIÊN (vd tăng trần đột
+    biến từ thanh khoản thấp). _coverage_gap không bắt được case này vì chỉ
+    kích hoạt khi TỶ LỆ LỚN rổ chưa phủ; case này thường chỉ vài mã lẻ giữa
+    1 rổ đã covered đầy đủ nên tỷ lệ tổng thể không tụt dưới COVERAGE_MIN_RATIO.
+    Không có gì để vá nếu active rỗng (ngoài phiên/fetch lỗi)."""
+    active_fn = active_fn or vn100_service.get_active_symbols
+    return [s for s in active_fn() if s not in _volumes]
+
+
+def _seed_newly_active_pending(active_fn=None):
+    """Nối mã mới active (xem _newly_active_symbols) vào _pending — được
+    _drain_pending vét mỗi phút như mã rate-limit thường, có tín hiệu ngay
+    trong phiên thay vì đợi refresh 15:05 hôm sau. Bỏ qua mã đã chờ sẵn."""
+    _pending.extend(s for s in _newly_active_symbols(active_fn) if s not in _pending)
 
 
 async def scheduler_loop():
