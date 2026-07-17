@@ -136,6 +136,11 @@ def build_power_board(board: list[dict]) -> dict:
     rows = _process(board)
     if members:
         rows = [r for r in rows if r["symbol"] in members]
+    return _power_payload(rows)
+
+
+def _power_payload(rows: list[dict]) -> dict:
+    """Chiếu rows về payload /power: mỗi dòng đúng 4 field."""
     return {
         "data": [
             {
@@ -149,12 +154,23 @@ def build_power_board(board: list[dict]) -> dict:
     }
 
 
+def power_board_from_vn100_rows(rows: list[dict]) -> dict:
+    """Dựng payload /power từ rows của view /vn100 (snapshot board_vn100 —
+    last-good phiên trước, đã lọc value + sort sẵn): lọc theo cờ `vn100` đã lưu
+    thay vì gọi get_vn100_members (boot trước phiên có thể chưa lấy được rổ).
+    Phiên trước members rỗng → mọi cờ False → giữ nguyên rows (degrade mềm,
+    cùng tinh thần build_power_board khi members rỗng)."""
+    flagged = [r for r in rows if r.get("vn100")]
+    return _power_payload(flagged if flagged else rows)
+
+
 def get_power_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
     """Lấy payload /power trực tiếp (fallback khi cache market_wide trống):
     1 request price_board cho đúng rổ VN100 (~100 mã) → build_power_board.
 
-    Members chưa lấy được / fetch lỗi → {data: []} (FE giữ data cũ qua
-    react-query, lần poll sau tự lành)."""
+    Members chưa lấy được / fetch lỗi → {data: []} (lần poll sau tự lành —
+    lưu ý FE KHÔNG giữ data cũ: response rỗng-thành-công vẫn ghi đè cache
+    react-query, trang power sẽ báo 'Không có dữ liệu')."""
     members = get_vn100_members()
     if not members:
         return {"data": []}

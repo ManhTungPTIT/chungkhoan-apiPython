@@ -128,6 +128,16 @@ def refresh_board_vn100():
         market_cache.set_snapshot("board_vn100", _build_board_vn100_snapshot(board))
         return False
     snapshot = _build_board_vn100_snapshot(board)
+    # Đính kèm breadth/depth (đã dựng sẵn trong market_wide mỗi ~20s — 0 call
+    # thêm) vào cache đĩa: boot trước phiên đọc lại để /homepage/market-breadth
+    # và market-depth hiện số phiên trước thay vì 0 (cùng tinh thần power).
+    # Chưa có market_wide (boot đầu phiên, bước này chạy trước refresh_tick
+    # trong refresh_all) → bỏ qua, lần save hàng giờ kế tiếp sẽ có.
+    wide = market_cache.get_snapshot("market_wide") or {}
+    if wide.get("breadth"):
+        snapshot["breadth"] = wide["breadth"]
+    if wide.get("depth"):
+        snapshot["depth"] = wide["depth"]
     market_cache.set_snapshot("board_vn100", snapshot)
     _save_board_vn100_cache(snapshot)
     return True
@@ -264,6 +274,17 @@ def _vn100_view(board):
     return vn100_service.build_board([r for r in board if r["symbol"] in basket])
 
 
+def _preopen_power_view():
+    """Power lúc boot trước phiên: dựng lại từ snapshot board_vn100 (last-good
+    từ đĩa, đã load ở lifespan trước tick đầu) để /power trả đồ thị phiên trước
+    thay vì rỗng. Chưa từng có snapshot (boot lần đầu tiên) → {"data": []}."""
+    snap = market_cache.get_snapshot("board_vn100") or {}
+    rows = ((snap.get("vn100") or {}).get("data")) or []
+    if not rows:
+        return {"data": []}
+    return vn100_service.power_board_from_vn100_rows(rows)
+
+
 def refresh_tick(build_views=True):
     """1 request price_board(toàn TT) mỗi tick → LUÔN cập nhật snapshot `quotes`
     (giá + KL khớp real-time cho /quotes, nhịp 1s trong giờ GD).
@@ -297,18 +318,32 @@ def refresh_tick(build_views=True):
         market_cache.set_snapshot("market_wide", None, ok=False)
         return
     volumes = signal_service.volumes_snapshot()
+    breadth = homepage_service.build_market_breadth(
+        snap["board"], _prev_total_volume_today()
+    )
+    depth = homepage_service.build_market_depth(snap["bid_ask"])
+    if preopen:
+        # Boot trước phiên: lấy lại breadth/depth phiên trước từ cache đĩa
+        # board_vn100 (đính kèm lúc save hàng giờ) thay vì số 0. Riêng
+        # prev_total_volume dùng bản tính mới hôm nay (KL "hôm qua" đúng
+        # nghĩa — bản lưu trên đĩa là của hôm kia). Cache cũ chưa có key
+        # (file từ trước feature) → giữ bản vừa dựng.
+        saved = market_cache.get_snapshot("board_vn100") or {}
+        if saved.get("breadth"):
+            breadth = {**saved["breadth"], "prev_total_volume": breadth["prev_total_volume"]}
+        depth = saved.get("depth") or depth
     market_cache.set_snapshot(
         "market_wide",
         {
-            "breadth": homepage_service.build_market_breadth(
-                snap["board"], _prev_total_volume_today()
-            ),
-            "depth": homepage_service.build_market_depth(snap["bid_ask"]),
+            "breadth": breadth,
+            "depth": depth,
             "top_volume": homepage_service.build_top_volume(volumes, snap["bid_ask"], limit=10),
-            # Boot trước phiên (chưa có last-good): giữ key `power` rỗng để
-            # endpoint /power không fan-out fetch theo request; vn100=None để
-            # endpoint /vn100 fallback snapshot board_vn100 (last-good từ đĩa).
-            "power": {"data": []} if preopen else vn100_service.build_power_board(snap["board"]),
+            # Boot trước phiên (chưa có last-good): power dựng từ snapshot
+            # board_vn100 (last-good từ đĩa) để trang power hiện đồ thị phiên
+            # trước; giữ key `power` để endpoint /power không fan-out fetch
+            # theo request. vn100=None để endpoint /vn100 fallback snapshot
+            # board_vn100 trực tiếp.
+            "power": _preopen_power_view() if preopen else vn100_service.build_power_board(snap["board"]),
             "vn100": None if preopen else _vn100_view(snap["board"]),
         },
     )
