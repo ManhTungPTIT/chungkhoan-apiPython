@@ -28,6 +28,36 @@ def _default_listing():
     return df.loc[mask, "symbol"].tolist()
 
 
+_exchange_map: dict[str, str] = {}
+_exchange_map_date = None
+
+
+def _default_exchange_listing():
+    from vnstock_data import Listing
+
+    return Listing(source=VCI).symbols_by_exchange()
+
+
+def _symbol_exchange_map(listing_fn: Callable = _default_exchange_listing) -> dict[str, str]:
+    """Bản đồ symbol -> exchange, memoize theo NGÀY (cùng pattern _all_symbols
+    ở market_refresher.py). Lỗi fetch -> giữ bản đồ cũ (nếu có), không raise,
+    để _default_price_board tự xử lý mã lạ qua nhóm "unknown"."""
+    global _exchange_map, _exchange_map_date
+    today = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d")
+    if _exchange_map and _exchange_map_date == today:
+        return _exchange_map
+    try:
+        df = listing_fn()
+        mapping = dict(zip(df["symbol"], df["exchange"]))
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("symbols_by_exchange thất bại: %s", _short(e))
+        return _exchange_map
+    if mapping:
+        _exchange_map = mapping
+        _exchange_map_date = today
+    return _exchange_map
+
+
 def _default_price_board(symbols: list[str]):
     from vnstock_data import Trading
 
