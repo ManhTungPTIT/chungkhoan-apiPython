@@ -6,9 +6,11 @@ vnii tìm key theo thứ tự: env VNSTOCK_API_KEY → ~/.vnstock/api_key.json.
 vnstock vẫn chạy nhưng bị giới hạn tier Community 60 req/phút (Golden: 500).
 """
 
+import importlib.util
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -78,6 +80,68 @@ def _download_and_install_vnii_package(package_name: str, version: str) -> bool:
     fixed = path.parent / f"{package_name}-{version}.tar.gz"
     path = path.rename(fixed)
     return pm.install_package(path)
+
+
+def patch_vnstock_data_retries(
+    retries: int = 1,
+    package_name: str = "vnstock_data",
+    find_spec_fn: Optional[Callable] = None,
+) -> bool:
+    """Giảm số lần tenacity tự retry nội bộ của vnstock_data (mặc định 3) —
+    PHẢI gọi TRƯỚC ensure_vnstock_data()/bất kỳ import vnstock_data nào khác
+    trong tiến trình, nếu không sẽ không có tác dụng gì.
+
+    Các method fetch của vnstock_data (vd Trading.price_board) decorate bằng
+    @retry(stop=stop_after_attempt(Config.RETRIES)) — tenacity ĐỌC
+    Config.RETRIES ĐÚNG 1 LẦN lúc module định nghĩa hàm (import time) rồi bake
+    cứng số đó vào decorator; sửa Config.RETRIES sau khi package đã import
+    không đổi được hành vi đã bake (verify thủ công 18/07/2026). Vì vậy phải
+    nạp config.py ĐỘC LẬP (bypass __init__ package, importlib.util) rồi đăng
+    ký thẳng vào sys.modules TRƯỚC — khi vnstock_data (hay submodule nào của
+    nó) `from vnstock_data.config import Config`, Python thấy module đã có
+    sẵn trong sys.modules nên dùng luôn bản đã patch, không chạy lại file gốc.
+
+    KHÔNG giảm được REQUEST_TIMEOUT (mặc định 30s/lần) qua đường này — các
+    method fetch (vd price_board) gọi send_request() không truyền timeout=,
+    luôn dùng mặc định cứng 30 viết literal trong client.py, không đọc từ
+    Config ở đường gọi đó.
+
+    Trả True nếu patch được, False nếu quá muộn (đã import) hoặc không tìm
+    thấy package — KHÔNG raise, chỉ log cảnh báo (patch fail không nên chặn
+    app khởi động, chỉ mất tối ưu retry, vnstock_data vẫn dùng mặc định)."""
+    if package_name in sys.modules or f"{package_name}.config" in sys.modules:
+        logger.warning(
+            "%s da duoc import truoc do — qua muon de giam RETRIES (decorator "
+            "@retry da bake gia tri goc luc import)",
+            package_name,
+        )
+        return False
+
+    find_spec_fn = find_spec_fn or importlib.util.find_spec
+    try:
+        spec = find_spec_fn(package_name)
+    except (ImportError, ValueError) as e:
+        logger.warning("khong tim duoc %s de giam RETRIES (%s)", package_name, e)
+        return False
+    if spec is None or not spec.submodule_search_locations:
+        logger.warning("khong tim duoc %s de giam RETRIES (spec rong)", package_name)
+        return False
+
+    cfg_path = os.path.join(spec.submodule_search_locations[0], "config.py")
+    try:
+        cfg_spec = importlib.util.spec_from_file_location(
+            f"{package_name}.config", cfg_path
+        )
+        cfg_mod = importlib.util.module_from_spec(cfg_spec)
+        cfg_spec.loader.exec_module(cfg_mod)
+    except (FileNotFoundError, OSError, AttributeError) as e:
+        logger.warning("khong nap duoc %s/config.py de giam RETRIES (%s)", package_name, e)
+        return False
+
+    cfg_mod.Config.RETRIES = retries
+    sys.modules[f"{package_name}.config"] = cfg_mod
+    logger.info("da giam %s RETRIES xuong %s truoc luc import", package_name, retries)
+    return True
 
 
 def ensure_vnstock_data(

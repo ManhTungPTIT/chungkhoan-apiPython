@@ -45,9 +45,20 @@ async def lifespan(app: FastAPI):
     # có bước đó nên PHẢI tự tạo trước, nếu không import vnstock_data crash
     # (SystemExit "Không tìm thấy thông tin người dùng hợp lệ").
     vnstock_license.ensure_user_profile()
+    # Giảm retry nội bộ (tenacity) của vnstock_data từ 3 xuống 1 TRƯỚC lần
+    # import đầu tiên — sau đó set không còn tác dụng (decorator đã bake giá
+    # trị gốc). Gọi lần 1 TRƯỚC ensure_vnstock_data(): bắt trường hợp gói ĐÃ
+    # CÓ SẴN trên đĩa (vd máy dev — ensure_vnstock_data() bên dưới sẽ import
+    # thành công ngay, quá muộn để patch nếu chờ tới đây). Lần 1 fail (gói
+    # CHƯA cài, container mới, chưa có gì trên đĩa để tìm spec) → thử lại
+    # NGAY SAU khi cài xong, vẫn kịp trước lần import thật sự đầu tiên
+    # (data_source gọi sau, không phải ở đây).
+    _patched_early = vnstock_license.patch_vnstock_data_retries()
     # vnstock_data không cài được qua pip (xem requirements.txt) — tự tải+cài
     # ở đây bằng API key vừa xác thực, TRƯỚC khi data_source gọi lần đầu.
     vnstock_license.ensure_vnstock_data()
+    if not _patched_early:
+        vnstock_license.patch_vnstock_data_retries()
     # Warm danh sÃƒÂ¡ch mÃƒÂ£ rÃ¡Â»â€¢ theo dÃƒÂµi + danh sÃƒÂ¡ch VN100 (cÃ¡Â»Â `vn100` trÃƒÂªn board)
     # lÃƒÂºc khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng (memoize). LÃ¡Â»â€”i cÃ…Â©ng khÃƒÂ´ng sao Ã¢â‚¬â€ request /vn100 Ã„â€˜Ã¡ÂºÂ§u tiÃƒÂªn sÃ¡ÂºÂ½
     # tÃ¡Â»Â± thÃ¡Â»Â­ lÃ¡ÂºÂ¡i.

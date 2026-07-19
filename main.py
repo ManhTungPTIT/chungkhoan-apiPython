@@ -104,7 +104,13 @@ def main():
         return
     vnstock_license.ensure_license()
     vnstock_license.ensure_user_profile()
+    # Giảm retry nội bộ vnstock_data TRƯỚC lần import đầu tiên — xem comment
+    # đầy đủ trong api.py lifespan. Gọi lại sau ensure_vnstock_data() nếu lần
+    # đầu fail (gói vừa được cài mới, chưa tồn tại trên đĩa lúc patch lần 1).
+    _patched_early = vnstock_license.patch_vnstock_data_retries()
     vnstock_license.ensure_vnstock_data()
+    if not _patched_early:
+        vnstock_license.patch_vnstock_data_retries()
     print(f"Starting VN100 feed | interval={args.interval}s")
     print("Fetching first batch...")
 
