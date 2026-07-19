@@ -178,7 +178,14 @@ def _default_all_listing():
 def _default_history(symbol: str, start: str, end: str, interval: str = "1D"):
     from vnstock_data import Quote
 
-    return Quote(symbol=symbol, source=VCI).history(
+    # Nguồn ASEAN thay VCI (19/07/2026): host VCI (trading.vietcap.com.vn) bị
+    # anti-bot chặn/timeout khi gọi dày (history là luồng nặng nhất — quét tín
+    # hiệu ~55 call/phút), còn ASEAN trả cùng shape time/open/high/low/close/
+    # volume (probe xác nhận, khớp _map_history) và tách hẳn khỏi host VCI.
+    # Cần vnstock_data >= 3.2.5 (xem vnstock_license.VNSTOCK_DATA_VERSION).
+    # price_board KHÔNG đổi được sang ASEAN: bên đó chỉ có 5 cột tĩnh
+    # (trần/sàn/tham chiếu), không có giá khớp/KL/bid-ask.
+    return Quote(symbol=symbol, source="ASEAN").history(
         start=start, end=end, interval=interval
     )
 

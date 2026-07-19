@@ -59,7 +59,9 @@ def ensure_license(
     return info
 
 
-VNSTOCK_DATA_VERSION = "3.2.3"
+# 3.2.5: bản tối thiểu có nguồn ASEAN cho Quote.history (data_source._default_history
+# dùng ASEAN để né anti-bot host VCI — xác nhận với hỗ trợ vnstock 19/07/2026).
+VNSTOCK_DATA_VERSION = "3.2.5"
 
 
 def _download_and_install_vnii_package(package_name: str, version: str) -> bool:
