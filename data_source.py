@@ -35,9 +35,15 @@ _exchange_map_date = None
 
 
 def _default_exchange_listing():
-    from vnstock_data import Listing
+    from vnstock_data import Trading
 
-    return Listing(source=VCI).symbols_by_exchange()
+    # Nguồn ASEAN thay listing VCI (tối 19/07/2026): symbols_by_exchange của
+    # VCI sập/treo 30s hàng loạt, trong khi price_board() ASEAN trả đủ 2 cột
+    # symbol+exchange toàn TT trong ~1s — bản đồ sàn chỉ cần đúng 2 cột đó.
+    # KHÔNG dùng giá từ nguồn này (ASEAN chỉ có giá tĩnh trần/sàn/tham chiếu).
+    # Lưu ý nhãn sàn ASEAN là 'HOSE' (không phải 'HSX' như VCI) — chỉ dùng làm
+    # nhãn nhóm/log nên không ảnh hưởng logic chia mẻ.
+    return Trading(source="ASEAN").price_board()
 
 
 def _symbol_exchange_map(listing_fn: Callable = _default_exchange_listing) -> dict[str, str]:
