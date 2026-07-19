@@ -150,11 +150,21 @@ def ensure_vnstock_data(
     import_fn: Optional[Callable] = None,
     install_fn: Optional[Callable] = None,
     version: str = VNSTOCK_DATA_VERSION,
+    version_fn: Optional[Callable] = None,
 ) -> bool:
-    """Đảm bảo vnstock_data (gói sponsor proprietary) import được, tự tải+cài
-    nếu thiếu. Trả True nếu sẵn sàng, False nếu không (data_source sẽ lỗi khi
-    gọi thật — không chặn app khởi động, tự retry ở request kế nếu deploy có
-    mạng lại).
+    """Đảm bảo vnstock_data (gói sponsor proprietary) import được VÀ đúng bản
+    pin VNSTOCK_DATA_VERSION — tự tải+cài nếu thiếu hoặc LỆCH VERSION (deploy
+    có sẵn bản cũ sẽ được nâng cấp tự động lúc khởi động, không cần cài tay).
+    Trả True nếu sẵn sàng, False nếu không (data_source sẽ lỗi khi gọi thật —
+    không chặn app khởi động, tự retry ở request kế nếu deploy có mạng lại).
+
+    So version bằng metadata pip (importlib.metadata) chứ KHÔNG import trước:
+    - vnstock_data.__version__ là chuỗi STALE (bản 3.2.5 vẫn in 3.2.2) nên
+      không tin được;
+    - import bản cũ rồi mới cài thì sys.modules đã giữ bản cũ tới hết đời
+      process — cài xong cũng không có tác dụng ngay boot này.
+    Metadata thiếu (cài tay kiểu lạ) mà import vẫn chạy → giữ hành vi cũ, coi
+    như sẵn sàng, không cài đè.
 
     vnstock_data KHÔNG cài được qua pip — không nằm trên bất kỳ index nào,
     kể cả --extra-index-url của vnstocks.com. Nó là gói proprietary chỉ tải
@@ -167,12 +177,24 @@ def ensure_vnstock_data(
         import importlib
 
         import_fn = lambda: importlib.import_module("vnstock_data")  # noqa: E731
+    if version_fn is None:
+        from importlib.metadata import version as version_fn  # noqa: F811
 
     try:
-        import_fn()
-        return True
-    except ImportError:
-        pass
+        installed = version_fn("vnstock_data")
+    except Exception:  # PackageNotFoundError hoặc metadata hỏng
+        installed = None
+
+    if installed is not None and installed != version:
+        logger.info(
+            "vnstock_data %s khac ban pin %s — cai lai ban pin", installed, version
+        )
+    else:
+        try:
+            import_fn()
+            return True
+        except ImportError:
+            pass
 
     if install_fn is None:
         install_fn = _download_and_install_vnii_package
