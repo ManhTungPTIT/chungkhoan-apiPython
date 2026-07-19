@@ -1,6 +1,7 @@
 """Test data_source offline â€” inject history_fn giáº£, khÃ´ng gá»i vnstock tháº­t."""
 
 import datetime as dt
+import logging
 import time
 
 import pandas as pd
@@ -474,3 +475,68 @@ def test_default_price_board_fetches_groups_concurrently(monkeypatch):
     )
     elapsed = time.monotonic() - start
     assert elapsed < 0.5
+
+
+def test_default_price_board_logs_slow_group(monkeypatch, caplog):
+    """Đo đạc hiện trường: nhóm sàn fetch lâu hơn ngưỡng SLOW_FETCH_LOG_S phải
+    để lại log WARNING kèm thời gian + số mã — chẩn đoán timeout phía vendor."""
+    _reset_exchange_memo(monkeypatch)
+    monkeypatch.setattr(data_source, "SLOW_FETCH_LOG_S", 0.0)
+    listing_df = pd.DataFrame({"symbol": ["AAA"], "exchange": ["HSX"]})
+
+    def board_fetch_fn(symbols):
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    with caplog.at_level(logging.WARNING):
+        data_source._default_price_board(
+            ["AAA"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+        )
+    assert "price_board sàn HSX chậm" in caplog.text
+
+
+def test_default_price_board_fast_group_stays_quiet(monkeypatch, caplog):
+    """Nhóm fetch nhanh (dưới ngưỡng mặc định) → KHÔNG log 'chậm' (tránh spam
+    log mỗi tick trong giờ GD)."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA"], "exchange": ["HSX"]})
+
+    def board_fetch_fn(symbols):
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    with caplog.at_level(logging.WARNING):
+        data_source._default_price_board(
+            ["AAA"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+        )
+    assert "chậm" not in caplog.text
+
+
+def test_default_price_board_failure_log_includes_duration(monkeypatch, caplog):
+    """Nhóm lỗi phải log kèm thời gian đã chờ + số mã — phân biệt fail-nhanh
+    (rate-limit trả lỗi ngay) với treo-tới-timeout (~30s)."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA", "BBB"], "exchange": ["HSX", "UPCOM"]})
+
+    def board_fetch_fn(symbols):
+        if symbols == ["BBB"]:
+            raise RuntimeError("timeout")
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    with caplog.at_level(logging.WARNING):
+        data_source._default_price_board(
+            ["AAA", "BBB"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+        )
+    assert "thất bại sau" in caplog.text
+    assert "(1 mã)" in caplog.text
+
+
+def test_fetch_intraday_history_logs_slow(monkeypatch, caplog):
+    """history chậm hơn ngưỡng cũng phải log WARNING kèm thời gian."""
+    monkeypatch.setattr(data_source, "SLOW_FETCH_LOG_S", 0.0)
+    df = pd.DataFrame(
+        [{"time": "2026-06-15", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0}]
+    )
+    with caplog.at_level(logging.WARNING):
+        data_source.fetch_intraday_history(
+            "SSI", "a", "b", history_fn=lambda *a, **k: df
+        )
+    assert "history(SSI) chậm" in caplog.text

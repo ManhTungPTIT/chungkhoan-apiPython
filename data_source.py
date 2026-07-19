@@ -2,6 +2,7 @@
 
 import datetime as dt
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
@@ -59,10 +60,30 @@ def _symbol_exchange_map(listing_fn: Callable = _default_exchange_listing) -> di
     return _exchange_map
 
 
+# Ngưỡng (giây) log WARNING khi 1 lần fetch vendor chậm — đo đạc hiện trường
+# xem endpoint nào (price_board theo sàn / history) chậm tới mức nào, phục vụ
+# chẩn đoán timeout trước khi chỉnh nhịp/song song. REQUEST_TIMEOUT của
+# vnstock_data là 30s CỨNG không giảm được (xem
+# vnstock_license.patch_vnstock_data_retries) nên giá trị đo sát 30s nghĩa là
+# đã chạm trần timeout.
+SLOW_FETCH_LOG_S = 3.0
+
+
 def _default_board_fetch(symbols: list[str]):
     from vnstock_data import Trading
 
     return Trading(symbol=symbols[0], source=VCI).price_board(symbols)
+
+
+def _timed_board_fetch(board_fetch_fn: Callable, symbols: list[str]):
+    """Chạy 1 fetch nhóm sàn, trả (df, giây, lỗi). Lỗi TRẢ VỀ thay vì ném để
+    caller log kèm thời gian đã chờ — phân biệt fail-nhanh (rate-limit trả lỗi
+    ngay) với treo-tới-timeout (~30s)."""
+    start = time.monotonic()
+    try:
+        return board_fetch_fn(symbols), time.monotonic() - start, None
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        return None, time.monotonic() - start, e
 
 
 def _group_symbols_by_exchange(symbols: list[str], exchange_map: dict[str, str]) -> dict[str, list[str]]:
@@ -94,16 +115,27 @@ def _default_price_board(
     failed_exchanges = []
     with ThreadPoolExecutor(max_workers=len(groups)) as executor:
         future_to_exchange = {
-            executor.submit(board_fetch_fn, group_symbols): exch
+            executor.submit(_timed_board_fetch, board_fetch_fn, group_symbols): (
+                exch,
+                len(group_symbols),
+            )
             for exch, group_symbols in groups.items()
         }
         for future in as_completed(future_to_exchange):
-            exch = future_to_exchange[future]
-            try:
-                frames.append(future.result())
-            except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
-                logger.warning("price_board sàn %s thất bại: %s", exch, _short(e))
+            exch, count = future_to_exchange[future]
+            df, elapsed, err = future.result()
+            if err is not None:
+                logger.warning(
+                    "price_board sàn %s (%d mã) thất bại sau %.1fs: %s",
+                    exch, count, elapsed, _short(err),
+                )
                 failed_exchanges.append(exch)
+                continue
+            if elapsed >= SLOW_FETCH_LOG_S:
+                logger.warning(
+                    "price_board sàn %s chậm: %.1fs (%d mã)", exch, elapsed, count
+                )
+            frames.append(df)
 
     if not frames:
         if failed_exchanges:
@@ -284,11 +316,18 @@ def fetch_intraday_history(
     history_fn: Callable = _default_history,
 ) -> Optional[list[dict]]:
     """Láº¥y náº¿n lá»‹ch sá»­ 1 mÃ£ theo khung interval. Tráº£ None náº¿u lá»—i (ká»ƒ cáº£ rate-limit)."""
+    start_t = time.monotonic()
     try:
         df = history_fn(symbol, start, end, interval=interval)
     except BaseException as e:  # noqa: BLE001 â€” cá»‘ Ã½ báº¯t cáº£ SystemExit
-        logger.warning("history(%s) tháº¥t báº¡i: %s", symbol, _short(e))
+        logger.warning(
+            "history(%s) thất bại sau %.1fs: %s",
+            symbol, time.monotonic() - start_t, _short(e),
+        )
         return None
+    elapsed = time.monotonic() - start_t
+    if elapsed >= SLOW_FETCH_LOG_S:
+        logger.warning("history(%s) chậm: %.1fs", symbol, elapsed)
 
     if df is None or getattr(df, "empty", False):
         return []
