@@ -3,6 +3,7 @@
 import datetime as dt
 
 import pandas as pd
+import pytest
 
 import data_source
 
@@ -375,3 +376,80 @@ def test_symbol_exchange_map_keeps_stale_on_error(monkeypatch):
 
     out = data_source._symbol_exchange_map(listing_fn=boom)
     assert out == {"AAA": "HSX"}
+
+
+def test_default_price_board_splits_by_exchange(monkeypatch):
+    """Chia mã theo sàn, gọi board_fetch_fn riêng từng nhóm thay vì 1 request
+    gộp toàn bộ."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame(
+        {"symbol": ["AAA", "BBB", "CCC"], "exchange": ["HSX", "HNX", "UPCOM"]}
+    )
+    calls = []
+
+    def board_fetch_fn(symbols):
+        calls.append(sorted(symbols))
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    data_source._default_price_board(
+        ["AAA", "BBB", "CCC"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert sorted(calls) == [["AAA"], ["BBB"], ["CCC"]]
+
+
+def test_default_price_board_merges_successful_groups(monkeypatch):
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA", "BBB"], "exchange": ["HSX", "HNX"]})
+
+    def board_fetch_fn(symbols):
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    out = data_source._default_price_board(
+        ["AAA", "BBB"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert sorted(out[("listing", "symbol")].tolist()) == ["AAA", "BBB"]
+
+
+def test_default_price_board_partial_failure_keeps_successful_groups(monkeypatch):
+    """1 sàn lỗi (vd UPCOM timeout) không làm fail toàn bộ — vẫn gộp dữ liệu
+    các sàn thành công."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA", "BBB"], "exchange": ["HSX", "UPCOM"]})
+
+    def board_fetch_fn(symbols):
+        if symbols == ["BBB"]:
+            raise RuntimeError("timeout")
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    out = data_source._default_price_board(
+        ["AAA", "BBB"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert out[("listing", "symbol")].tolist() == ["AAA"]
+
+
+def test_default_price_board_raises_when_all_groups_fail(monkeypatch):
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA"], "exchange": ["HSX"]})
+
+    def board_fetch_fn(symbols):
+        raise RuntimeError("timeout")
+
+    with pytest.raises(RuntimeError):
+        data_source._default_price_board(
+            ["AAA"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+        )
+
+
+def test_default_price_board_unknown_exchange_still_included(monkeypatch):
+    """Mã không tra được sàn (không có trong bản đồ) vẫn được gửi request
+    riêng, không bị rớt khỏi kết quả."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame({"symbol": ["AAA"], "exchange": ["HSX"]})
+
+    def board_fetch_fn(symbols):
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    out = data_source._default_price_board(
+        ["AAA", "ZZZ"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert sorted(out[("listing", "symbol")].tolist()) == ["AAA", "ZZZ"]

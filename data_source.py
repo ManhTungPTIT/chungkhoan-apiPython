@@ -58,10 +58,49 @@ def _symbol_exchange_map(listing_fn: Callable = _default_exchange_listing) -> di
     return _exchange_map
 
 
-def _default_price_board(symbols: list[str]):
+def _default_board_fetch(symbols: list[str]):
     from vnstock_data import Trading
 
     return Trading(symbol=symbols[0], source=VCI).price_board(symbols)
+
+
+def _group_symbols_by_exchange(symbols: list[str], exchange_map: dict[str, str]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        exch = exchange_map.get(symbol, "unknown")
+        groups.setdefault(exch, []).append(symbol)
+    return groups
+
+
+def _default_price_board(
+    symbols: list[str],
+    board_fetch_fn: Callable = _default_board_fetch,
+    listing_fn: Callable = _default_exchange_listing,
+):
+    """Chia symbols theo sàn (HSX/HNX/UPCOM; mã không tra được sàn -> nhóm
+    "unknown") rồi gọi price_board riêng từng nhóm, gộp lại — 1 request cho
+    ~1600 mã toàn TT dễ timeout/lỗi payload lớn. Nhóm lỗi bị bỏ qua (log
+    warning); chỉ raise khi TẤT CẢ nhóm đều lỗi, giữ hợp đồng "fetch lỗi ->
+    None" của các hàm fetch_* bao ngoài."""
+    import pandas as pd
+
+    exchange_map = _symbol_exchange_map(listing_fn)
+    groups = _group_symbols_by_exchange(symbols, exchange_map)
+
+    frames = []
+    failed_exchanges = []
+    for exch, group_symbols in groups.items():
+        try:
+            frames.append(board_fetch_fn(group_symbols))
+        except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+            logger.warning("price_board sàn %s thất bại: %s", exch, _short(e))
+            failed_exchanges.append(exch)
+
+    if not frames:
+        if failed_exchanges:
+            raise RuntimeError(f"price_board thất bại toàn bộ sàn: {failed_exchanges}")
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _default_all_listing():
