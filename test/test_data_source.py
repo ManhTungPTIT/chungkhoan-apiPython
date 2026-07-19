@@ -1,6 +1,7 @@
 """Test data_source offline â€” inject history_fn giáº£, khÃ´ng gá»i vnstock tháº­t."""
 
 import datetime as dt
+import time
 
 import pandas as pd
 import pytest
@@ -453,3 +454,23 @@ def test_default_price_board_unknown_exchange_still_included(monkeypatch):
         ["AAA", "ZZZ"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
     )
     assert sorted(out[("listing", "symbol")].tolist()) == ["AAA", "ZZZ"]
+
+
+def test_default_price_board_fetches_groups_concurrently(monkeypatch):
+    """3 sàn phải fetch song song, không tuần tự — tuần tự sẽ mất ~3×0.2s,
+    song song chỉ mất ~0.2s (thời gian 1 request chậm nhất)."""
+    _reset_exchange_memo(monkeypatch)
+    listing_df = pd.DataFrame(
+        {"symbol": ["AAA", "BBB", "CCC"], "exchange": ["HSX", "HNX", "UPCOM"]}
+    )
+
+    def board_fetch_fn(symbols):
+        time.sleep(0.2)
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in symbols])
+
+    start = time.monotonic()
+    data_source._default_price_board(
+        ["AAA", "BBB", "CCC"], board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.5

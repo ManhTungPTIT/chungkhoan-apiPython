@@ -2,6 +2,7 @@
 
 import datetime as dt
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -78,23 +79,31 @@ def _default_price_board(
     listing_fn: Callable = _default_exchange_listing,
 ):
     """Chia symbols theo sàn (HSX/HNX/UPCOM; mã không tra được sàn -> nhóm
-    "unknown") rồi gọi price_board riêng từng nhóm, gộp lại — 1 request cho
-    ~1600 mã toàn TT dễ timeout/lỗi payload lớn. Nhóm lỗi bị bỏ qua (log
-    warning); chỉ raise khi TẤT CẢ nhóm đều lỗi, giữ hợp đồng "fetch lỗi ->
-    None" của các hàm fetch_* bao ngoài."""
+    "unknown") rồi gọi price_board riêng từng nhóm SONG SONG (mỗi sàn 1 luồng
+    — vendor call là I/O đồng bộ, chạy tuần tự sẽ cộng dồn latency 3-4 lần),
+    gộp lại. Nhóm lỗi bị bỏ qua (log warning); chỉ raise khi TẤT CẢ nhóm đều
+    lỗi, giữ hợp đồng "fetch lỗi -> None" của các hàm fetch_* bao ngoài."""
     import pandas as pd
 
     exchange_map = _symbol_exchange_map(listing_fn)
     groups = _group_symbols_by_exchange(symbols, exchange_map)
+    if not groups:
+        return pd.DataFrame()
 
     frames = []
     failed_exchanges = []
-    for exch, group_symbols in groups.items():
-        try:
-            frames.append(board_fetch_fn(group_symbols))
-        except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
-            logger.warning("price_board sàn %s thất bại: %s", exch, _short(e))
-            failed_exchanges.append(exch)
+    with ThreadPoolExecutor(max_workers=len(groups)) as executor:
+        future_to_exchange = {
+            executor.submit(board_fetch_fn, group_symbols): exch
+            for exch, group_symbols in groups.items()
+        }
+        for future in as_completed(future_to_exchange):
+            exch = future_to_exchange[future]
+            try:
+                frames.append(future.result())
+            except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+                logger.warning("price_board sàn %s thất bại: %s", exch, _short(e))
+                failed_exchanges.append(exch)
 
     if not frames:
         if failed_exchanges:
