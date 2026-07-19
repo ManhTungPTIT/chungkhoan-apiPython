@@ -540,3 +540,59 @@ def test_fetch_intraday_history_logs_slow(monkeypatch, caplog):
             "SSI", "a", "b", history_fn=lambda *a, **k: df
         )
     assert "history(SSI) chậm" in caplog.text
+
+
+def test_default_price_board_chunks_large_group_max_500(monkeypatch):
+    """Sàn >500 mã phải chia mẻ ≤500 (khuyến nghị vendor 19/07/2026: payload
+    lớn hơn làm backend VCI tính quá 30s timeout) — 1200 mã UPCOM → 3 request
+    cân bằng, không mất/không trùng mã nào."""
+    _reset_exchange_memo(monkeypatch)
+    symbols = [f"S{i:04d}" for i in range(1200)]
+    listing_df = pd.DataFrame({"symbol": symbols, "exchange": ["UPCOM"] * 1200})
+    calls = []
+
+    def board_fetch_fn(chunk):
+        calls.append(list(chunk))
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in chunk])
+
+    out = data_source._default_price_board(
+        symbols, board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert len(calls) == 3
+    assert all(len(c) <= 500 for c in calls)
+    assert sorted(sym for c in calls for sym in c) == sorted(symbols)
+    assert len(out) == 1200
+
+
+def test_default_price_board_small_group_stays_single_request(monkeypatch):
+    """Sàn ≤500 mã giữ nguyên 1 request — không chia vụn vô ích."""
+    _reset_exchange_memo(monkeypatch)
+    symbols = [f"S{i:04d}" for i in range(500)]
+    listing_df = pd.DataFrame({"symbol": symbols, "exchange": ["HSX"] * 500})
+    calls = []
+
+    def board_fetch_fn(chunk):
+        calls.append(list(chunk))
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in chunk])
+
+    data_source._default_price_board(
+        symbols, board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert len(calls) == 1
+
+
+def test_default_price_board_chunk_failure_keeps_other_chunks(monkeypatch):
+    """1 mẻ trong sàn lỗi → các mẻ còn lại (kể cả cùng sàn) vẫn được gộp."""
+    _reset_exchange_memo(monkeypatch)
+    symbols = [f"S{i:04d}" for i in range(600)]
+    listing_df = pd.DataFrame({"symbol": symbols, "exchange": ["UPCOM"] * 600})
+
+    def board_fetch_fn(chunk):
+        if "S0000" in chunk:
+            raise RuntimeError("timeout")
+        return _match_board_df([(s, 10.0, 11.0, 1.0) for s in chunk])
+
+    out = data_source._default_price_board(
+        symbols, board_fetch_fn=board_fetch_fn, listing_fn=lambda: listing_df
+    )
+    assert len(out) == 300  # mẻ sau (300 mã) vẫn về đủ

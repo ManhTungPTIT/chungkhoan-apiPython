@@ -94,16 +94,32 @@ def _group_symbols_by_exchange(symbols: list[str], exchange_map: dict[str, str])
     return groups
 
 
+# Vendor khuyến nghị tối đa ~500 mã/request price_board (xác nhận từ hỗ trợ
+# vnstock 19/07/2026): payload lớn hơn khiến backend VCI tính realtime quá
+# 30s (timeout cứng) và gọi lặp dễ bị nhận diện bot → chặn tạm. Sàn đông mã
+# (UPCOM ~900) vì vậy phải chia thêm mẻ TRONG sàn.
+PRICE_BOARD_CHUNK_MAX = 500
+
+
+def _split_chunks(symbols: list[str], max_size: int) -> list[list[str]]:
+    """Chia list thành các mẻ ≤ max_size, kích thước cân bằng (900 → 450+450
+    thay vì 500+400) để không mẻ nào sát trần payload."""
+    n_chunks = -(-len(symbols) // max_size)  # ceil
+    size = -(-len(symbols) // n_chunks)
+    return [symbols[i : i + size] for i in range(0, len(symbols), size)]
+
+
 def _default_price_board(
     symbols: list[str],
     board_fetch_fn: Callable = _default_board_fetch,
     listing_fn: Callable = _default_exchange_listing,
 ):
     """Chia symbols theo sàn (HSX/HNX/UPCOM; mã không tra được sàn -> nhóm
-    "unknown") rồi gọi price_board riêng từng nhóm SONG SONG (mỗi sàn 1 luồng
-    — vendor call là I/O đồng bộ, chạy tuần tự sẽ cộng dồn latency 3-4 lần),
-    gộp lại. Nhóm lỗi bị bỏ qua (log warning); chỉ raise khi TẤT CẢ nhóm đều
-    lỗi, giữ hợp đồng "fetch lỗi -> None" của các hàm fetch_* bao ngoài."""
+    "unknown"), sàn đông mã chia tiếp thành mẻ ≤ PRICE_BOARD_CHUNK_MAX (UPCOM
+    ~900 → 2 mẻ), rồi gọi price_board riêng từng mẻ SONG SONG (mỗi mẻ 1 luồng
+    — vendor call là I/O đồng bộ, chạy tuần tự sẽ cộng dồn latency), gộp lại.
+    Mẻ lỗi bị bỏ qua (log warning); chỉ raise khi TẤT CẢ mẻ đều lỗi, giữ hợp
+    đồng "fetch lỗi -> None" của các hàm fetch_* bao ngoài."""
     import pandas as pd
 
     exchange_map = _symbol_exchange_map(listing_fn)
@@ -111,15 +127,24 @@ def _default_price_board(
     if not groups:
         return pd.DataFrame()
 
+    # (nhãn, mẻ) — nhãn kèm chỉ số mẻ khi sàn bị chia (vd "UPCOM[1/2]") để log
+    # đo lường/lỗi chỉ đích danh mẻ nào chậm/hỏng.
+    batches = []
+    for exch, group_symbols in groups.items():
+        chunks = _split_chunks(group_symbols, PRICE_BOARD_CHUNK_MAX)
+        for i, chunk in enumerate(chunks):
+            label = exch if len(chunks) == 1 else f"{exch}[{i + 1}/{len(chunks)}]"
+            batches.append((label, chunk))
+
     frames = []
     failed_exchanges = []
-    with ThreadPoolExecutor(max_workers=len(groups)) as executor:
+    with ThreadPoolExecutor(max_workers=len(batches)) as executor:
         future_to_exchange = {
-            executor.submit(_timed_board_fetch, board_fetch_fn, group_symbols): (
-                exch,
-                len(group_symbols),
+            executor.submit(_timed_board_fetch, board_fetch_fn, chunk): (
+                label,
+                len(chunk),
             )
-            for exch, group_symbols in groups.items()
+            for label, chunk in batches
         }
         for future in as_completed(future_to_exchange):
             exch, count = future_to_exchange[future]

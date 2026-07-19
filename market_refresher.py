@@ -4,14 +4,15 @@ CHỈ luồng này gọi vnstock cho dữ liệu chung → số call không ph�
 Chạy qua asyncio.to_thread (vnstock là call đồng bộ) để không chặn event loop,
 theo đúng pattern signal_service.scheduler_loop.
 
-Ngân sách trong giờ GD: tick 1s × (3 price_board chia theo sàn HSX/HNX/UPCOM
-+ 1 history nến 1D VNINDEX cho /quotes) = 240 call/phút — tick thường chỉ cập
-nhật snapshot quotes (/quotes); mỗi tick thứ 20 (~20s) tái dùng CÙNG lần fetch
-đó dựng thêm views market_wide + warm nến VNINDEX (3 call/phút, KHÔNG đổi so
-với bản 5s trước — vẫn giữ nhịp 20s). Tổng ~243 call/phút — dưới hạn Golden
-500 req/phút, nhưng VƯỢT hạn Community 60 req/phút (chấp nhận được vì project
-chạy tier Golden, xem vnstock_license; nếu rớt về Community phải tăng lại
-QUOTES_INTERVAL_S).
+Ngân sách trong giờ GD: tick 1s × (4 price_board — chia theo sàn HSX/HNX/UPCOM,
+UPCOM ~900 mã chia tiếp 2 mẻ ≤500 mã theo khuyến nghị vendor (xem
+data_source.PRICE_BOARD_CHUNK_MAX) + 1 history nến 1D VNINDEX cho /quotes)
+= 300 call/phút — tick thường chỉ cập nhật snapshot quotes (/quotes); mỗi
+tick thứ 20 (~20s) tái dùng CÙNG lần fetch đó dựng thêm views market_wide +
+warm nến VNINDEX (3 call/phút, KHÔNG đổi so với bản 5s trước — vẫn giữ nhịp
+20s). Tổng ~303 call/phút — dưới hạn Golden 500 req/phút, nhưng VƯỢT hạn
+Community 60 req/phút (chấp nhận được vì project chạy tier Golden, xem
+vnstock_license; nếu rớt về Community phải tăng lại QUOTES_INTERVAL_S).
 Danh sách mã (all_symbols) memoize theo ngày, không tính vào ngân sách trên.
 Board VN100 (price_board rổ VNALL+HNX) KHÔNG chạy mỗi chu kỳ mà giãn ~1 tiếng/lần
 (BOARD_VN100_INTERVAL_S) — sectors + heatmap đổi chậm, không cần 20s. Riêng view
