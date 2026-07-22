@@ -8,8 +8,8 @@ Bản đồ ngành (mã → ICB cấp 3) đổi rất hiếm nên được memoi
 giống danh sách VN100 trong vn100_service. Fetch hỏng (None) → trả {data: []}.
 """
 
-import data_source
-import vn100_service
+from app.data import data_source
+from app.services import vn100_service
 
 UNCLASSIFIED = "Chưa phân loại"
 

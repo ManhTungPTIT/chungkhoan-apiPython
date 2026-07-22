@@ -1,7 +1,7 @@
 """main.py — Công cụ xem bảng VN100 trên terminal (dùng cho kiểm tra tay).
 
 Cách dùng:
-    python main.py --interval 60
+    python -m app.cli --interval 60
 
 CLI này dùng lại cùng đường lấy dữ liệu với API (data_source + vn100_service),
 tức gọi gộp `price_board` 1 request cho cả nhóm VN100 thay vì fan-out 100 request.
@@ -9,7 +9,7 @@ Tự làm mới theo chu kỳ cho đến khi nhấn Ctrl+C.
 
 Mode thứ 2 — kiểm tra tick realtime qua WebSocket (không đi qua data_source,
 gọi thẳng endpoint /api/python/ws/quotes như 1 client thật, server phải đang
-chạy sẵn — vd `uvicorn api:app --port 8808`):
+chạy sẵn — vd `uvicorn app.api:app --port 8808`):
     python main.py --ws --symbols FPT,OIL
     python main.py --ws --symbols FPT --host ws://<production-host>/api/python/ws/quotes
 """
@@ -27,9 +27,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-import data_source
-import vn100_service
-import vnstock_license
+from app.data import data_source
+from app.services import vn100_service
+from app.core import vnstock_license
 
 DEFAULT_WS_HOST = "ws://127.0.0.1:8808/api/python/ws/quotes"
 

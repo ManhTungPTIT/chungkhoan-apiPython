@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-import envfile
+from app.core import envfile
 
 logger = logging.getLogger(__name__)
 # Project không cấu hình logging (root chỉ có lastResort in WARNING+), nên

@@ -9,6 +9,12 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 VCI = "VCI"
+# Normalize exchange labels from vendor sources (VCI may return HSX while
+# other sources return HOSE).
+SUPPORTED_EXCHANGES = {"HOSE", "HSX", "HNX", "UPCOM"}
+def _normalize_exchange(value) -> str:
+    exchange = str(value or "").strip().upper()
+    return "HOSE" if exchange == "HSX" else exchange
 # Giá» VN (UTC+7) â€” dÃ¹ng khi cáº§n "hÃ´m nay" theo lá»‹ch giao dá»‹ch, khÃ´ng phá»¥ thuá»™c
 # mÃºi giá» cá»§a mÃ¡y chá»§ (Ä‘á»“ng bá»™ vá»›i signal_service/market_refresher).
 VN_TZ = dt.timezone(dt.timedelta(hours=7))
@@ -26,8 +32,10 @@ def _default_listing():
     # loại này cũng mang exchange HSX/HNX/UPCOM nên lọt qua nếu chỉ lọc exchange
     # (bug đã gặp: mã "41I1G7000" là CW lẫn vào, không phải cổ phiếu).
     df = Listing(source=VCI).symbols_by_exchange()
-    mask = df["exchange"].isin(["HSX", "HNX", "UPCOM"]) & (df["type"] == "STOCK")
-    return df.loc[mask, "symbol"].tolist()
+    exchanges = df["exchange"].map(_normalize_exchange)
+    mask = exchanges.isin({"HOSE", "HNX", "UPCOM"}) & (df["type"] == "STOCK")
+    symbols = df.loc[mask, "symbol"].dropna().astype(str).str.strip().tolist()
+    return list(dict.fromkeys(symbols))
 
 
 _exchange_map: dict[str, str] = {}
@@ -238,6 +246,24 @@ def fetch_vn100_members(
         return None
 
 
+def _default_vn30_members_listing():
+    from vnstock_data import Listing
+
+    return Listing(source=VCI).symbols_by_group("VN30").tolist()
+
+
+def fetch_vn30_members(
+    listing_fn: Callable = _default_vn30_members_listing,
+) -> Optional[list[str]]:
+    """Danh sách 30 mã rổ VN30 — phục vụ cộng giá trị khớp lệnh nhóm VN30 cho
+    chart 'Chỉ số chung 3 sàn'. Trả None nếu lỗi (kể cả rate-limit)."""
+    try:
+        return listing_fn()
+    except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+        logger.warning("listing VN30 that bai: %s", _short(e))
+        return None
+
+
 def fetch_vn100_board(
     symbols: list[str],
     price_board_fn: Callable = _default_price_board,
@@ -419,6 +445,7 @@ def _map_board(df) -> list[dict]:
         out.append(
             {
                 "symbol": symbol,
+                "exchange": _normalize_exchange(row.get(("listing", "exchange"), "")),
                 "price": price,
                 "change_pct": change_pct,
                 "value": value_millions * 1_000_000,

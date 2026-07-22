@@ -7,7 +7,7 @@ không bao giờ ném ra ngoài.
 
 from datetime import datetime, timedelta, timezone
 
-import data_source
+from app.data import data_source
 
 VN_TZ = timezone(timedelta(hours=7))
 DEFAULT_INTERVAL = "1d"

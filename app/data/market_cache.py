@@ -14,7 +14,7 @@ sẻ chung cho mọi request — không cần Redis.
 import threading
 import time
 
-import intraday_service
+from app.data import intraday_service
 
 
 # ===== Snapshot dùng chung =====

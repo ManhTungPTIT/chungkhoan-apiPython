@@ -5,8 +5,8 @@
 vậy homepage không phải fetch lại ~100 mã → nhanh, né rate-limit.
 """
 
-import data_source
-import signal_service
+from app.data import data_source
+from app.services import signal_service
 
 # Index đại diện 3 sàn để cộng tổng KL toàn thị trường (mỗi index history có cột
 # volume = tổng KL khớp của sàn đó).

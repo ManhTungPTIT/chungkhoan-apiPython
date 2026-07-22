@@ -28,12 +28,12 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-import data_source
-import homepage_service
-import market_cache
-import sector_service
-import signal_service
-import vn100_service
+from app.data import data_source
+from app.services import homepage_service
+from app.data import market_cache
+from app.services import sector_service
+from app.services import signal_service
+from app.services import vn100_service
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +55,13 @@ _all_symbols_date = None   # ngÃƒÂ y (giÃ¡Â»Â VN) Ã„â€˜ÃƒÂ�
 # ~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n thay vÃƒÂ¬ mÃ¡Â»â€”i chu kÃ¡Â»Â³ 20s: dÃ¡Â»Â¯ liÃ¡Â»â€¡u Ã„â€˜Ã¡Â»â€¢i chÃ¡ÂºÂ­m, tiÃ¡ÂºÂ¿t kiÃ¡Â»â€¡m ~3 call/phÃƒÂºt.
 BOARD_VN100_INTERVAL_S = 3600
 _last_board_vn100_at = 0.0  # time.monotonic() lÃ¡ÂºÂ§n refresh board VN100 gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t (thÃƒÂ nh cÃƒÂ´ng)
+RUNTIME_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data",
+)
 BOARD_VN100_CACHE_FILE = os.environ.get(
     "BOARD_VN100_CACHE_FILE",
-    os.path.join(os.path.dirname(__file__), "board_vn100_cache.json"),
+    os.path.join(RUNTIME_DATA_DIR, "board_vn100_cache.json"),
 )
 # NÃ¡ÂºÂ¿n dÃ¡Â»Â±ng sÃ¡ÂºÂµn cho trang mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh (FE mÃ¡Â»Å¸ VNINDEX khung 1d khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng).
 WARM_INTRADAY = [("VNINDEX", "1d")]
@@ -166,6 +170,41 @@ def load_board_vn100_cache():
         return None
     market_cache.set_snapshot("board_vn100", snapshot)
     return snapshot
+
+
+# Board TOÀN thị trường (cho flow_surge). Persist ra đĩa + nạp lúc boot để CHART
+# vẫn hiển thị (đủ universe rộng) khi hết phiên / sáng hôm sau trước giờ mở, kể
+# cả sau restart qua đêm — RAM last-good mất khi restart. Ghi throttled (không
+# mỗi tick ~20s) vì payload full board lớn hơn board_vn100.
+MARKET_BOARD_FULL_CACHE_FILE = os.environ.get(
+    "MARKET_BOARD_FULL_CACHE_FILE",
+    os.path.join(RUNTIME_DATA_DIR, "market_board_full_cache.json"),
+)
+FULL_BOARD_SAVE_INTERVAL_S = 600  # ghi đĩa tối đa mỗi ~10 phút
+_last_full_board_save_at = 0.0
+
+
+def _save_market_board_full_cache(rows):
+    try:
+        with open(MARKET_BOARD_FULL_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi market_board_full cache that bai: %s", e)
+
+
+def load_market_board_full_cache():
+    """Nạp last-good board toàn TT từ đĩa trước lần fetch vnstock đầu — để
+    flow_surge có universe rộng ngay khi boot ngoài giờ giao dịch."""
+    try:
+        with open(MARKET_BOARD_FULL_CACHE_FILE, encoding="utf-8") as f:
+            rows = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.info("khong nap market_board_full cache tu dia: %s", e)
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    market_cache.set_snapshot("market_board_full", rows)
+    return rows
 
 def _maybe_refresh_board_vn100(now=None):
     """Refresh board VN100 tÃ¡Â»â€˜i Ã„â€˜a mÃ¡Â»â€”i BOARD_VN100_INTERVAL_S (~1 tiÃ¡ÂºÂ¿ng). ChÃ¡Â»â€° dÃ¡Â»Âi
@@ -349,6 +388,16 @@ def refresh_tick(build_views=True):
             "vn100": None if preopen else _vn100_view(snap["board"]),
         },
     )
+    # Board TOÀN thị trường (chưa lọc value) cho flow_surge_service mở rộng
+    # universe — 0 call vnstock thêm (tái dùng cùng fetch). Preopen (board chưa
+    # có giao dịch) → giữ last-good, không ghi đè bằng board value=0.
+    if not preopen:
+        market_cache.set_snapshot("market_board_full", snap["board"])
+        global _last_full_board_save_at
+        now_mono = time.monotonic()
+        if now_mono - _last_full_board_save_at > FULL_BOARD_SAVE_INTERVAL_S:
+            _save_market_board_full_cache(snap["board"])
+            _last_full_board_save_at = now_mono
 
 
 def warm_intraday():

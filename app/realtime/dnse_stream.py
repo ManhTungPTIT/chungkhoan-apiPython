@@ -23,12 +23,12 @@ import time
 
 import yaml
 
-import envfile
+from app.core import envfile
 
 logger = logging.getLogger(__name__)
 
-MODULE_DIR = os.path.dirname(__file__)
-DEFAULT_CREDS_FILE = os.path.join(MODULE_DIR, "dnse_creds.yaml")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEFAULT_CREDS_FILE = os.path.join(PROJECT_ROOT, "dnse_creds.yaml")
 
 # Mã chỉ số đi qua kênh `market_index` (khác cổ phiếu đi kênh `tick`/trades).
 # Danh sách các index DNSE phát; FE mặc định mở VNINDEX.

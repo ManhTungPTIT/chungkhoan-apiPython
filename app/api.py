@@ -23,15 +23,20 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-import dnse_stream
-import homepage_service
-import market_cache
-import market_refresher
-import sector_service
-import signal_service
-import tick_hub
-import vn100_service
-import vnstock_license
+from app.realtime import dnse_stream
+from app.services import homepage_service
+from app.data import market_cache
+from app.data import market_refresher
+from app.services import sector_service
+from app.services import signal_service
+from app.services import flow_surge_service
+from app.services import index_overview_service
+from app.services import period_gain_service
+from app.realtime import tick_hub
+from app.services import top_gain_service
+from app.services import tplus_wave_service
+from app.services import vn100_service
+from app.core import vnstock_license
 
 
 @asynccontextmanager
@@ -72,6 +77,9 @@ async def lifespan(app: FastAPI):
     # crash/--reload) vÃ¡ÂºÂ«n tÃƒÂ­nh Ã„â€˜Ã†Â°Ã¡Â»Â£c tÃƒÂ­n hiÃ¡Â»â€¡u live theo giÃƒÂ¡ hiÃ¡Â»â€¡n tÃ¡ÂºÂ¡i ngay, thay
     # vÃƒÂ¬ Ã„â€˜ÃƒÂ³ng bÃ„Æ’ng Ã¡Â»Å¸ tÃƒÂ­n hiÃ¡Â»â€¡u cache cÃ…Â© tÃ¡Â»â€ºi tÃ¡ÂºÂ­n 15:05.
     signal_service.load_history_cache()
+    # Board toàn TT (flow_surge) — nạp last-good từ đĩa để chart dòng tiền vẫn
+    # hiển thị đủ universe khi boot ngoài giờ / sáng hôm sau trước giờ mở.
+    market_refresher.load_market_board_full_cache()
     asyncio.create_task(signal_service.scheduler_loop())
     # LuÃ¡Â»â€œng refresh nÃ¡Â»Ân cho snapshot thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng dÃƒÂ¹ng chung (board VN100 + toÃƒÂ n TT +
     # nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh). TÃ¡Â»Â± warm ngay khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng Ã¢â€ â€™ trang cÃƒÂ³ nÃ¡Â»â„¢i dung dÃ¡Â»Â±ng sÃ¡ÂºÂµn.
@@ -127,6 +135,55 @@ def get_power():
     if snap and "power" in snap:
         return snap["power"]
     return vn100_service.get_power_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
+
+
+@app.get("/api/python/tplus-wave")
+def get_tplus_wave():
+    """Radar 'Các mã đang có sóng tăng T+': top mã đang buy, mức tăng cao nhất
+    trong cửa sổ T+2/T+3/T+5 phiên kể từ ngày báo. Đọc cache tín hiệu + nến base
+    đã nạp trong RAM (không gọi vnstock theo request)."""
+    return tplus_wave_service.get_tplus_wave()
+
+
+@app.get("/api/python/top-gain-tplus")
+def get_top_gain_tplus(
+    top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
+    window: int = Query(2, ge=2, le=5, description="Cửa sổ T+: 2 (T+2) hoặc 3 (T+3)"),
+):
+    """Chart 'TOP TĂNG CAO NHẤT T+N': top mã đang HOLD đúng T+N (window), tăng giá
+    cao nhất — 3 số/mã (giá trị khớp lệnh N phiên, giá hiện tại, % tăng so ngày báo).
+    Đọc snapshot board_vn100 (đã gắn signal) + nến base RAM, không gọi vnstock."""
+    return top_gain_service.get_top_gain(top_n, window=window)
+
+
+@app.get("/api/python/top-gain-period")
+def get_top_gain_period(
+    period: str = Query("week", pattern="^(week|month)$", description="Kỳ: week / month"),
+    top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
+):
+    """Chart 'TOP TĂNG CAO NHẤT TUẦN/THÁNG': toàn board sắp theo % tăng trong kỳ
+    (so giá hiện tại với close phiên đầu kỳ) — 3 số/mã (value cộng dồn trong kỳ,
+    giá hiện tại, % tăng). Đọc snapshot board + nến base RAM, không gọi vnstock."""
+    return period_gain_service.get_period_gain(period, top_n)
+
+
+@app.get("/api/python/flow-surge")
+def get_flow_surge(
+    top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
+    avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
+):
+    """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN HÔM NAY': toàn board sắp theo % tăng dòng
+    tiền = (value hôm nay − trung bình value N phiên) / trung bình × 100. Cột tím
+    là value riêng hôm nay. Đọc snapshot board + nến base RAM, không gọi vnstock."""
+    return flow_surge_service.get_flow_surge(top_n, avg_window)
+
+
+@app.get("/api/python/index-overview")
+def get_index_overview():
+    """Chart 'CHỈ SỐ CHUNG 3 SÀN': 4 nhóm VN INDEX/HN INDEX/UP INDEX/VN30, mỗi
+    nhóm giá trị khớp lệnh (nghìn tỷ) + điểm tăng giảm + %. Value/sàn cộng từ CP
+    thật (market_board_full + bản đồ sàn); điểm chỉ số từ index history (memoize)."""
+    return index_overview_service.get_index_overview()
 
 
 @app.get("/api/python/intraday")

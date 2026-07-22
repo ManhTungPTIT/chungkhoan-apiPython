@@ -10,7 +10,7 @@ là 1 request `price_board` cho toàn bộ mã. Fetch hỏng (rate-limit/mạng)
 
 from datetime import datetime, timedelta, timezone
 
-import data_source
+from app.data import data_source
 
 VALUE_THRESHOLD = 1_000_000_000
 VN_TZ = timezone(timedelta(hours=7))
@@ -18,6 +18,8 @@ VN_TZ = timezone(timedelta(hours=7))
 _symbols: list[str] = []
 
 _vn100_members: list[str] = []
+
+_vn30_members: list[str] = []
 
 # Carry-over cho /vn100 (build_board): đầu phiên hầu hết mã chưa kịp đạt
 # VALUE_THRESHOLD của HÔM NAY nên danh sách rất ngắn dù tín hiệu vẫn tính được
@@ -28,6 +30,16 @@ _vn100_members: list[str] = []
 _today_accum_symbols: set[str] = set()
 _today_accum_date: str | None = None
 _prev_day_symbols: set[str] = set()
+SUPPORTED_EXCHANGES = ("HOSE", "HNX", "UPCOM")
+def _normalize_symbols(symbols) -> list[str]:
+    """Normalize the all-exchange symbol list and remove duplicates."""
+    if not symbols:
+        return []
+    return list(dict.fromkeys(
+        symbol.strip().upper()
+        for symbol in symbols
+        if isinstance(symbol, str) and symbol.strip()
+    ))
 
 
 def _process(board: list[dict]) -> list[dict]:
@@ -66,7 +78,7 @@ def get_symbols(fetch_fn=data_source.fetch_vn100_symbols) -> list[str]:
     if not _symbols:
         fetched = fetch_fn()
         if fetched:
-            _symbols = fetched
+            _symbols = _normalize_symbols(fetched)
     return _symbols
 
 
@@ -83,6 +95,17 @@ def get_vn100_members(fetch_fn=data_source.fetch_vn100_members) -> list[str]:
         if fetched:
             _vn100_members = fetched
     return _vn100_members
+
+
+def get_vn30_members(fetch_fn=data_source.fetch_vn30_members) -> list[str]:
+    """Danh sách 30 mã rổ VN30 — memoize 1 lần, phục vụ cộng value nhóm VN30 cho
+    chart 'Chỉ số chung 3 sàn'. Fetch hỏng (None) → giữ rỗng, lần sau thử lại."""
+    global _vn30_members
+    if not _vn30_members:
+        fetched = fetch_fn()
+        if fetched:
+            _vn30_members = fetched
+    return _vn30_members
 
 
 def get_active_symbols(fetch_fn=data_source.fetch_vn100_board) -> list[str]:
@@ -114,7 +137,7 @@ def build_board(board: list[dict], now=None) -> dict:
     Tín hiệu mua/bán (field `signal`) lấy từ cache signal_service (tính nền 1 lần/
     phiên) — import trễ để tránh vòng lặp import (signal_service cần vn100_service).
     """
-    import signal_service
+    from app.services import signal_service
 
     members = set(get_vn100_members())
     rows = _process_with_carryover(board, now=now)

@@ -7,7 +7,8 @@ Dùng chung cho dnse_stream (creds DNSE) và vnstock_license (VNSTOCK_API_KEY)
 import os
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_ENV_FILE = os.path.join(MODULE_DIR, ".env")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(MODULE_DIR))
+DEFAULT_ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 
 
 def load_dotenv(path: str | None = None) -> None:

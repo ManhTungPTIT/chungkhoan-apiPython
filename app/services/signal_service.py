@@ -1,4 +1,4 @@
-﻿"""Tín hiệu mua/bán Trend (SMA20 + MACD) cho rổ VN100 — tính nền, cache file.
+"""Tín hiệu mua/bán Trend (SMA20 + MACD) cho rổ VN100 — tính nền, cache file.
 
 Nến *ngày* chỉ đổi tối đa 1 lần/phiên (lúc đóng cửa) nên lịch sử được fetch chậm
 (throttle) 1 lần/ngày, tính tín hiệu cuối mỗi mã rồi cache ra JSON. Endpoint
@@ -21,8 +21,8 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 
-import data_source
-import vn100_service
+from app.data import data_source
+from app.services import vn100_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,15 @@ def _is_market_hours(now=None):
     return now.weekday() < 5 and MARKET_OPEN_HOUR <= now.hour < MARKET_CLOSE_HOUR
 
 
+DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data",
+)
 def _resolve_cache_file():
     """Đường dẫn cache runtime. Cho phép trỏ sang volume bền qua env
     SIGNAL_CACHE_FILE (môi trường read-only/ephemeral) — mặc định cạnh module."""
     return os.environ.get("SIGNAL_CACHE_FILE") or os.path.join(
-        os.path.dirname(__file__), "signal_cache.json"
+        DATA_DIR, "signal_cache.json"
     )
 
 
@@ -53,14 +57,14 @@ CACHE_FILE = _resolve_cache_file()
 # Seed commit sẵn (KHÔNG gitignore): cold start chưa có cache runtime vẫn có
 # signal hiển thị ngay, khỏi đợi warm refresh. Tín hiệu nến-ngày nên seed cũ vẫn
 # đúng tới 15:05; warm refresh sau đó tự cập nhật.
-SEED_FILE = os.path.join(os.path.dirname(__file__), "signal_cache.seed.json")
+SEED_FILE = os.path.join(DATA_DIR, "signal_cache.seed.json")
 
 
 def _resolve_history_file():
     """Đường dẫn cache nến base (_history_candles) — sống sót qua restart. Cho
     phép trỏ sang volume bền qua env SIGNAL_HISTORY_FILE, mặc định cạnh module."""
     return os.environ.get("SIGNAL_HISTORY_FILE") or os.path.join(
-        os.path.dirname(__file__), "signal_history.json"
+        DATA_DIR, "signal_history.json"
     )
 
 
@@ -327,16 +331,22 @@ def _to_candles(raw):
     out = []
     for r in raw:
         try:
-            out.append(
-                {
-                    "time": _normalize_candle_time(r["time"]),
-                    "high": float(r["high"]),
-                    "low": float(r["low"]),
-                    "close": float(r["close"]),
-                }
-            )
+            candle = {
+                "time": _normalize_candle_time(r["time"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+            }
         except (KeyError, TypeError, ValueError):
             continue
+        # Volume phiên (tùy nguồn có/không) — dùng cho cột "giá trị khớp lệnh"
+        # của chart Top tăng T+2 (value ≈ volume × close). Thiếu/hỏng → bỏ key,
+        # không loại nến (các luồng khác chỉ cần OHLC).
+        try:
+            candle["volume"] = int(float(r["volume"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        out.append(candle)
     return out
 
 
@@ -570,14 +580,24 @@ def _live_candle(row, today):
     OHLC/ngày hỏng (vd row test tối giản chỉ có price) → khỏi ghép, dùng tín
     hiệu cache."""
     try:
-        return {
-            "time": int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=VN_TZ).timestamp()),
-            "high": float(row["high"]) / PRICE_BOARD_SCALE,
-            "low": float(row["low"]) / PRICE_BOARD_SCALE,
-            "close": float(row["close"]) / PRICE_BOARD_SCALE,
-        }
+        close = float(row["close"]) / PRICE_BOARD_SCALE
+        high = float(row["high"]) / PRICE_BOARD_SCALE
+        low = float(row["low"]) / PRICE_BOARD_SCALE
     except (KeyError, TypeError, ValueError):
         return None
+    # close<=0 = CHƯA khớp lệnh (match_price NaN → _map_board ép về 0: ATO đầu
+    # phiên hoặc mã thanh khoản thấp chưa giao dịch), KHÔNG phải giá thật. Ghép
+    # nến close=0 vào base sẽ kéo SMA20 sập → SELL giả tại T+0 (price 0). Coi như
+    # chưa có dữ liệu live → caller (_live_signal) trả None → attach_signals giữ
+    # tín hiệu cache phiên trước (đúng theo nến ngày đã đóng).
+    if close <= 0:
+        return None
+    return {
+        "time": int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=VN_TZ).timestamp()),
+        "high": high,
+        "low": low,
+        "close": close,
+    }
 
 
 def _merge_today(base, live):
