@@ -202,6 +202,50 @@ def get_power_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
         return {"data": []}
     return build_power_board(board)
 
+def get_foreign_trading_board(fetch_fn=data_source.fetch_foreign_board, top_n=20) -> dict:
+    """Lấy payload /foreign-trading trực tiếp (fallback khi cache market_wide trống):
+    1 request lấy giá trị mua/bán ròng khối ngoại cho rổ VN100 → build_foreign_trading_board.
+
+    Members chưa lấy được / fetch lỗi → {buy: [], sell: []} (lần poll sau tự lành —
+    FE KHÔNG giữ data cũ, response rỗng vẫn ghi đè cache react-query)."""
+    members = get_vn100_members()
+    if not members:
+        return {"buy": [], "sell": []}
+    board = fetch_fn(members)
+    if board is None:
+        return {"buy": [], "sell": []}
+    return build_foreign_trading_board(board, top_n=top_n)
+
+
+def build_foreign_trading_board(board, top_n=20) -> dict:
+    """Tách board thành 2 nhóm: mua ròng (net_value > 0) / bán ròng (net_value < 0),
+    mỗi nhóm lấy top_n mã theo |net_value| lớn nhất, sort giảm dần."""
+    items = []
+    for b in board:
+        symbol = b.get("symbol")
+        if not symbol:
+            continue
+        net_value = b.get("foreign_net_value")  # tỷ VND, dương = mua ròng, âm = bán ròng
+        if net_value is None:
+            continue
+        items.append({
+            "symbol": symbol,
+            "price": b.get("price"),
+            "change_pct": b.get("change_pct"),
+            "net_value": net_value,
+        })
+
+    buys = sorted(
+        (x for x in items if x["net_value"] > 0),
+        key=lambda x: x["net_value"], reverse=True,
+    )[:top_n]
+    sells = sorted(
+        (x for x in items if x["net_value"] < 0),
+        key=lambda x: x["net_value"],  # âm nhất trước
+    )[:top_n]
+
+    return {"buy": buys, "sell": sells}
+
 
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
     """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu."""

@@ -564,3 +564,46 @@ def _map_history(df) -> list[dict]:
 
 def _short(e: BaseException) -> str:
     return str(e).splitlines()[0][:120] if str(e) else type(e).__name__
+
+def _map_foreign_trade(df) -> list[dict]:
+    out = []
+    for _, row in df.iterrows():
+        symbol = row[("listing", "symbol")]
+        if not isinstance(symbol, str) or not symbol:
+            continue
+        ref = _num(row[("listing", "ref_price")])
+        price = _num(row[("match", "match_price")])
+        change_pct = round((price - ref) / ref * 100, 2) if ref and price else 0.0
+        buy_value = _num(row[("match", "foreign_buy_value")])
+        sell_value = _num(row[("match", "foreign_sell_value")])
+        out.append(
+            {
+                "symbol": symbol,
+                "price": price,
+                "change_pct": change_pct,
+                "foreign_buy_value": buy_value,
+                "foreign_sell_value": sell_value,
+                "foreign_net_value": buy_value - sell_value,
+            }
+        )
+    return out
+
+
+def fetch_foreign_board(
+    symbols: list[str],
+    price_board_fn: Callable = _default_price_board,
+) -> Optional[list[dict]]:
+    """Khối ngoại mua/bán ròng mỗi mã (1 request price_board). Trả None nếu lỗi."""
+    try:
+        df = price_board_fn(symbols)
+    except BaseException as e:  # noqa: BLE001
+        logger.warning("price_board (foreign) thất bại: %s", _short(e))
+        return None
+
+    if df is None or getattr(df, "empty", False):
+        return []
+    try:
+        return _map_foreign_trade(df)
+    except BaseException as e:  # noqa: BLE001
+        logger.warning("price_board map foreign that bai: %s", _short(e), exc_info=True)
+        return None

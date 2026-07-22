@@ -137,6 +137,13 @@ def get_power():
         return snap["power"]
     return vn100_service.get_power_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
 
+@app.get("/api/python/foreign-trading")
+def get_foreign_trading():
+    snap = market_cache.get_snapshot("market_wide")
+    if snap and "foreign_trading" in snap:
+        return snap["foreign_trading"]
+    return vn100_service.get_foreign_trading_board()  # fallback: cache chưa warm
+
 
 @app.get("/api/python/tplus-wave")
 def get_tplus_wave(
