@@ -16,7 +16,32 @@ Xếp giảm dần theo gia_tang_T5, lấy top N mã (mặc định 15) để ra
 from app.services import signal_service
 
 WINDOWS = (2, 3, 5)
+MAX_WINDOWS = 6      # tối đa số cửa sổ (vùng) — hợp bảng màu radar
+WINDOW_MIN = 1
+WINDOW_MAX = 30
 DEFAULT_TOP_N = 15
+# Số mã mỗi VÙNG của radar 3 vùng (mỗi cửa sổ T+ một vùng góc riêng, top mã
+# sort theo chính cửa sổ đó — một mã có thể xuất hiện ở nhiều vùng).
+DEFAULT_ZONE_N = 8
+
+
+def parse_windows(raw, default=WINDOWS):
+    """Chuỗi 'windows' từ query (vd '2,4,7') → tuple int đã lọc/dedupe/sort. Chỉ
+    giữ [WINDOW_MIN..WINDOW_MAX], tối đa MAX_WINDOWS cửa sổ. Rỗng/rác → default."""
+    if not raw:
+        return default
+    seen = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        try:
+            n = int(part)
+        except (TypeError, ValueError):
+            continue
+        if WINDOW_MIN <= n <= WINDOW_MAX and n not in seen:
+            seen.append(n)
+    if not seen:
+        return default
+    return tuple(sorted(seen)[:MAX_WINDOWS])
 
 
 def _wave_for_symbol(candles, signal_date, windows=WINDOWS):
@@ -51,9 +76,16 @@ def _wave_for_symbol(candles, signal_date, windows=WINDOWS):
     return result
 
 
-def compute_tplus_wave(signals, history_candles, top_n=DEFAULT_TOP_N, windows=WINDOWS):
+def compute_tplus_wave(
+    signals, history_candles, top_n=DEFAULT_TOP_N, windows=WINDOWS, zone_n=DEFAULT_ZONE_N
+):
     """Hàm thuần (dễ test): nhận dict signals {mã: {signal,date,...}} + dict
-    history_candles {mã: [nến...]} → dict kết quả cho FE."""
+    history_candles {mã: [nến...]} → dict kết quả cho FE.
+
+    Ngoài shape cũ (symbols/series/max_value — 3 series trên CÙNG bộ trục), trả
+    thêm `zones` cho radar 3 VÙNG: mỗi cửa sổ có top `zone_n` mã RIÊNG sort theo
+    chính cửa sổ đó (chỉ mức tăng > 0 — vùng là TOP TĂNG), một mã có thể xuất
+    hiện ở nhiều vùng."""
     rows = []
     for symbol, entry in (signals or {}).items():
         if not isinstance(entry, dict) or entry.get("signal") != "buy":
@@ -77,15 +109,32 @@ def compute_tplus_wave(signals, history_candles, top_n=DEFAULT_TOP_N, windows=WI
     series = {f"t{n}": [r[f"t{n}"] for r in top] for n in windows}
     all_values = [v for n in windows for v in series[f"t{n}"]]
     max_value = round(max(all_values), 2) if all_values else 0.0
-    return {"symbols": symbols, "series": series, "max_value": max_value}
+
+    # Vùng theo từng cửa sổ: lấy trên TOÀN BỘ rows (không phải top đã cắt theo
+    # t5) để mã mạnh riêng ở cửa sổ ngắn không bị sót.
+    zones = {}
+    for n in windows:
+        key = f"t{n}"
+        gainers = sorted(
+            (r for r in rows if r.get(key, 0) > 0), key=lambda r: r[key], reverse=True
+        )[:zone_n]
+        zones[key] = {
+            "symbols": [r["symbol"] for r in gainers],
+            "values": [r[key] for r in gainers],
+        }
+        all_values.extend(zones[key]["values"])
+    max_value = round(max(all_values), 2) if all_values else 0.0
+
+    return {"symbols": symbols, "series": series, "max_value": max_value, "zones": zones}
 
 
-def get_tplus_wave(top_n=DEFAULT_TOP_N):
+def get_tplus_wave(top_n=DEFAULT_TOP_N, windows=WINDOWS, zone_n=DEFAULT_ZONE_N):
     """Điểm gọi runtime: đọc cache tín hiệu + nến base đã nạp sẵn trong RAM
-    (signal_service làm mới theo scheduler)."""
+    (signal_service làm mới theo scheduler). `windows` = các cửa sổ T+ muốn xem."""
     cache = getattr(signal_service, "_cache", None) or {}
     signals = cache.get("signals") or {}
     history = getattr(signal_service, "_history_candles", None) or {}
-    result = compute_tplus_wave(signals, history, top_n=top_n)
+    result = compute_tplus_wave(signals, history, top_n=top_n, windows=windows, zone_n=zone_n)
+    result["windows"] = list(windows)
     result["generated_at"] = cache.get("last_refresh")
     return result

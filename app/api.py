@@ -31,6 +31,7 @@ from app.services import sector_service
 from app.services import signal_service
 from app.services import flow_surge_service
 from app.services import index_overview_service
+from app.services import market_status_service
 from app.services import period_gain_service
 from app.realtime import tick_hub
 from app.services import top_gain_service
@@ -138,11 +139,17 @@ def get_power():
 
 
 @app.get("/api/python/tplus-wave")
-def get_tplus_wave():
+def get_tplus_wave(
+    windows: str = Query(
+        "2,3,5", description="Các cửa sổ T+ muốn xem, cách nhau dấu phẩy (vd 2,4,7)"
+    ),
+):
     """Radar 'Các mã đang có sóng tăng T+': top mã đang buy, mức tăng cao nhất
-    trong cửa sổ T+2/T+3/T+5 phiên kể từ ngày báo. Đọc cache tín hiệu + nến base
+    trong các cửa sổ T+ tùy chọn kể từ ngày báo. Đọc cache tín hiệu + nến base
     đã nạp trong RAM (không gọi vnstock theo request)."""
-    return tplus_wave_service.get_tplus_wave()
+    return tplus_wave_service.get_tplus_wave(
+        windows=tplus_wave_service.parse_windows(windows)
+    )
 
 
 @app.get("/api/python/top-gain-tplus")
@@ -176,6 +183,14 @@ def get_flow_surge(
     tiền = (value hôm nay − trung bình value N phiên) / trung bình × 100. Cột tím
     là value riêng hôm nay. Đọc snapshot board + nến base RAM, không gọi vnstock."""
     return flow_surge_service.get_flow_surge(top_n, avg_window)
+
+
+@app.get("/api/python/market-status")
+def get_market_status():
+    """Chart 'DIỄN BIẾN THỊ TRƯỜNG': đếm số mã toàn thị trường (3 sàn gộp) theo 5
+    nhóm loại trừ lẫn nhau (tăng trần/tăng giá/đứng giá/giảm giá/giảm sàn). Đọc
+    snapshot market_board_full (đã có ceiling/floor), không gọi vnstock thêm."""
+    return market_status_service.get_market_status()
 
 
 @app.get("/api/python/index-overview")

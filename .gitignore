@@ -9,3 +9,6 @@ market_board_full_cache.json
 data/board_vn100_cache.json
 data/market_board_full_cache.json
 dnse_creds.yaml
+tests/
+.supperpowers/
+docs/
