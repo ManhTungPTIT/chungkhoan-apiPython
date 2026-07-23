@@ -246,6 +246,83 @@ def build_foreign_trading_board(board, top_n=20) -> dict:
 
     return {"buy": buys, "sell": sells}
 
+def build_top_value_board(board: list[dict], top_n=20) -> dict:
+    """Top N mã theo giá trị khớp lệnh (accumulated_value, đơn vị VND) — dùng
+    lại _process (đã lọc value > ngưỡng + sort giảm dần theo value), nên chỉ
+    cần cắt top_n, không cần sort lại."""
+    rows = _process(board)[:top_n]
+    return _value_payload(rows)
+
+def build_top_volume_board(board: list[dict], top_n=20) -> dict:
+    """Top N mã theo khối lượng khớp lệnh (accumulated_volume, đơn vị cổ
+    phiếu) — lọc value > ngưỡng (loại mã thanh khoản thấp/rác) rồi sort riêng
+    theo volume giảm dần (khác tiêu chí sort của _process)."""
+    filtered = [x for x in board if (x.get("value") or 0) > VALUE_THRESHOLD]
+    rows = sorted(filtered, key=lambda x: x.get("volume") or 0, reverse=True)[:top_n]
+    return _value_payload(rows)
+
+def _value_payload(rows: list[dict]) -> dict:
+    """Chiếu rows về payload dùng chung cho /top-value và /top-volume: mỗi
+    dòng giữ symbol/price/change_pct/value/volume — FE tự chọn field cần vẽ."""
+    return {
+        "data": [
+            {
+                "symbol": r["symbol"],
+                "price": r.get("price"),
+                "change_pct": r.get("change_pct"),
+                "value": r.get("value"),
+                "volume": r.get("volume"),
+            }
+            for r in rows
+        ]
+    }
+
+def get_top_value_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> dict:
+    """Lấy payload /top-value trực tiếp (fallback khi cache market_wide trống).
+    Members chưa lấy được / fetch lỗi → {data: []} (tự lành ở chu kỳ sau)."""
+    members = get_vn100_members()
+    if not members:
+        return {"data": []}
+    board = fetch_fn(members)
+    if board is None:
+        return {"data": []}
+    return build_top_value_board(board, top_n=top_n)
+
+def get_top_volume_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> dict:
+    """Lấy payload /top-volume trực tiếp (fallback khi cache market_wide trống)."""
+    members = get_vn100_members()
+    if not members:
+        return {"data": []}
+    board = fetch_fn(members)
+    if board is None:
+        return {"data": []}
+    return build_top_volume_board(board, top_n=top_n)
+
+def build_top_decline_board(board: list[dict], top_n=30) -> dict:
+    """Top N mã giảm giá mạnh nhất (change_pct nhỏ nhất, tức âm sâu nhất)
+    trong TOÀN THỊ TRƯỜNG (không giới hạn VN100, không lọc theo value —
+    khác _process của build_top_value_board/build_top_volume_board).
+
+    Chỉ lọc mã ĐÃ KHỚP LỆNH (price > 0) — mã chưa khớp có change_pct=0 do
+    thiếu ref, không phải "đứng giá" thật, nên bị loại để tránh nhiễu Top N."""
+    traded = [x for x in board if (x.get("price") or 0) > 0]
+    rows = sorted(traded, key=lambda x: x.get("change_pct") or 0)[:top_n]
+    return _value_payload(rows)
+
+
+def get_top_decline_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> dict:
+    """Lấy payload /top-decline-board trực tiếp (fallback khi cache market_wide
+    trống): 1 request price_board cho TOÀN thị trường (get_symbols() — cùng
+    universe với /vn100, KHÔNG dùng get_vn100_members()) → build_top_decline_board.
+
+    Chưa có danh sách / fetch lỗi → {data: []} (tự lành ở chu kỳ sau)."""
+    symbols = get_symbols()
+    if not symbols:
+        return {"data": []}
+    board = fetch_fn(symbols)
+    if board is None:
+        return {"data": []}
+    return build_top_decline_board(board, top_n=top_n)
 
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
     """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu."""
