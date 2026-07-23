@@ -319,18 +319,56 @@ def _maybe_refresh_sector_flow(now=None):
         _sector_flow_date = today
 
 
-def refresh_put_through():
+PUT_THROUGH_CACHE_FILE = os.environ.get(
+    "PUT_THROUGH_CACHE_FILE",
+    os.path.join(RUNTIME_DATA_DIR, "put_through_cache.json"),
+)
+
+
+def _save_put_through_cache(deals):
+    try:
+        with open(PUT_THROUGH_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(deals, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi put_through cache thất bại: %s", e)
+
+
+def load_put_through_cache():
+    """Nạp lệnh thỏa thuận phiên gần nhất từ đĩa lúc khởi động — RAM last-good
+    mất sau restart, mà bảng thỏa thuận sáng sớm chưa có lệnh nào."""
+    try:
+        with open(PUT_THROUGH_CACHE_FILE, encoding="utf-8") as f:
+            deals = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not deals:
+        return None
+    market_cache.set_snapshot("put_through", deals)
+    return deals
+
+
+def refresh_put_through(fetch_fn=None):
     """Snapshot `put_through`: TỪNG lệnh thỏa thuận cả 3 sàn (chưa gom, chưa lọc
     ngưỡng) để endpoint đổi min_value không phải fetch lại.
 
-    Fetch hỏng cả 3 sàn → đánh dấu stale, GIỮ bản tốt gần nhất: giá trị thỏa
-    thuận chỉ tăng dần trong phiên nên bản cũ vẫn đọc được, còn trả rỗng thì
-    biểu đồ trắng."""
-    deals = data_source.fetch_put_through()
+    Hai trường hợp đều GIỮ bản tốt gần nhất, vì cùng một lý do — giá trị thỏa
+    thuận chỉ tăng dần trong phiên nên bản cũ vẫn đọc được, còn ghi đè bằng rỗng
+    thì biểu đồ trắng:
+      - fetch hỏng cả 3 sàn (None) → đánh dấu stale;
+      - vendor trả RỖNG hợp lệ (sáng sớm chưa ai giao dịch thỏa thuận) → im lặng
+        giữ nguyên. Lệnh đầu tiên của phiên mới sẽ tự ghi đè.
+    Chưa từng có dữ liệu thì [] mới được ghi vào, để chart hiện trạng thái rỗng
+    thay vì treo mãi ở "đang tải".
+    """
+    deals = (fetch_fn or data_source.fetch_put_through)()
     if deals is None:
         market_cache.set_snapshot("put_through", None, ok=False)
         return False
+    if not deals and market_cache.get_snapshot("put_through"):
+        return True
     market_cache.set_snapshot("put_through", deals)
+    if deals:
+        _save_put_through_cache(deals)
     return True
 
 

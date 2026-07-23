@@ -89,6 +89,12 @@ async def lifespan(app: FastAPI):
     # Nến ngày toàn TT cho hai chart "5 phiên gần nhất" — nạp từ đĩa để khỏi
     # phải quét lại ~1.600 mã (~4 phút) sau mỗi lần restart.
     market_refresher.load_sector_flow_cache()
+    # Lệnh thỏa thuận phiên gần nhất — sáng sớm bảng thỏa thuận chưa có lệnh nào,
+    # không nạp lại thì chart trắng tới khi có lệnh đầu tiên.
+    market_refresher.load_put_through_cache()
+    # Bản đồ ngành — mọi chart theo ngành phụ thuộc vào nó; fetch hỏng lúc boot
+    # là mọi mã rơi vào "Chưa phân loại".
+    sector_service.load_industry_map_cache()
     asyncio.create_task(signal_service.scheduler_loop())
     # LuÃ¡Â»â€œng refresh nÃ¡Â»Ân cho snapshot thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng dÃƒÂ¹ng chung (board VN100 + toÃƒÂ n TT +
     # nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh). TÃ¡Â»Â± warm ngay khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng Ã¢â€ â€™ trang cÃƒÂ³ nÃ¡Â»â„¢i dung dÃ¡Â»Â±ng sÃ¡ÂºÂµn.

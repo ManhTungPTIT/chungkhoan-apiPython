@@ -8,24 +8,67 @@ Bản đồ ngành (mã → ICB cấp 3) đổi rất hiếm nên được memoi
 giống danh sách VN100 trong vn100_service. Fetch hỏng (None) → trả {data: []}.
 """
 
+import json
+import logging
+import os
+
 from app.data import data_source
 from app.services import vn100_service
+
+logger = logging.getLogger(__name__)
 
 UNCLASSIFIED = "Chưa phân loại"
 
 _industry_map: dict = {}
 
+# Bản đồ ngành đổi rất hiếm nhưng lại là thứ MỌI chart theo ngành phụ thuộc vào.
+# Chỉ memoize RAM thì sau mỗi lần restart phải fetch lại; fetch hỏng (vendor
+# chặn, mất mạng, chưa có license) là mọi mã rơi vào "Chưa phân loại" và các
+# chart theo ngành thu về đúng một hàng. Lưu đĩa để boot ngoài giờ vẫn đủ ngành.
+INDUSTRY_MAP_CACHE_FILE = os.environ.get(
+    "INDUSTRY_MAP_CACHE_FILE",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "data",
+        "industry_map_cache.json",
+    ),
+)
+
+
+def _save_industry_map_cache(imap: dict) -> None:
+    try:
+        with open(INDUSTRY_MAP_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(imap, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi industry map cache thất bại: %s", e)
+
+
+def load_industry_map_cache():
+    """Nạp bản đồ ngành từ đĩa vào memo (gọi lúc khởi động)."""
+    global _industry_map
+    try:
+        with open(INDUSTRY_MAP_CACHE_FILE, encoding="utf-8") as f:
+            imap = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not imap:
+        return None
+    _industry_map = imap
+    return imap
+
 
 def get_industry_map(fetch_fn=data_source.fetch_industry_map) -> dict:
-    """Lấy bản đồ mã → nhóm ICB cấp 3 1 lần rồi memoize.
+    """Lấy bản đồ mã → nhóm ICB cấp 3 1 lần rồi memoize (+ lưu đĩa).
 
-    Fetch hỏng (None) → giữ rỗng để lần gọi sau thử lại (self-heal).
+    Fetch hỏng (None/rỗng) → giữ nguyên bản đang có để lần gọi sau thử lại
+    (self-heal); KHÔNG ghi đè cache tốt trên đĩa bằng bản rỗng.
     """
     global _industry_map
     if not _industry_map:
         fetched = fetch_fn()
         if fetched:
             _industry_map = fetched
+            _save_industry_map_cache(fetched)
     return _industry_map
 
 
