@@ -158,6 +158,28 @@ def get_foreign_trading():
         return snap["foreign_trading"]
     return vn100_service.get_foreign_trading_board()  # fallback: cache chưa warm
 
+@app.get("/api/python/top-value-board")
+def get_top_value_board():
+    snap = market_cache.get_snapshot("market_wide")
+    if snap and "top_value_board" in snap:
+        return snap["top_value_board"]
+    return vn100_service.get_top_value_board()
+
+
+@app.get("/api/python/top-volume-board")
+def get_top_volume_board():
+    snap = market_cache.get_snapshot("market_wide")
+    if snap and "top_volume_board" in snap:
+        return snap["top_volume_board"]
+    return vn100_service.get_top_volume_board()
+
+@app.get("/api/python/top-decline-board")
+def get_top_decline_board():
+    snap = market_cache.get_snapshot("market_wide")
+    if snap and "top_decline_board" in snap:
+        return snap["top_decline_board"]
+    return vn100_service.get_top_decline_board()
+
 
 @app.get("/api/python/tplus-wave")
 def get_tplus_wave(
