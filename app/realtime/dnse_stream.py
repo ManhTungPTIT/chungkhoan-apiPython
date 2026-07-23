@@ -153,18 +153,45 @@ def _channels_for(symbol):
     return [f"tick.{board}.json" for board in DEFAULT_BOARDS]
 
 
-async def _subscribe_symbol(symbol):
-    """Đăng ký một mã trên SDK. Handler đã gắn 1 lần ở start_stream nên truyền
-    callback None (chỉ mở kênh, không gắn thêm handler → tránh gọi trùng)."""
+async def _subscribe_all_stocks():
+    """Gửi TOÀN BỘ mã cổ phiếu đang cần trong MỘT lệnh subscribe.
+
+    KHÔNG được subscribe từng mã một. 9 kênh `tick.G1…T6.json` dùng chung cho mọi
+    mã, mà SDK lưu `_subscriptions[channel] = {"symbols": symbols}` — ghi đè chứ
+    không gộp (dnse/websocket/client.py:479). Subscribe lẻ từng mã khiến trạng
+    thái lưu chỉ còn mã cuối cùng, nên sau mỗi lần reconnect SDK khôi phục đúng
+    mã đó và mọi mã khác im lặng mất đăng ký — không có log, không có tick.
+    Gửi cả rổ mỗi lần thì danh sách lưu (và danh sách phía server, nếu server
+    cũng coi subscribe là thay thế) luôn đầy đủ.
+    """
+    if _client is None:
+        return
+    stocks = sorted(s for s in _refcounts if not is_index(s))
+    if not stocks:
+        return
+    try:
+        await _client.subscribe_trades(stocks)
+    except Exception as e:  # noqa: BLE001 — lỗi subscribe không được làm sập stream
+        logger.warning("DNSE subscribe %d ma loi: %s", len(stocks), e)
+
+
+async def _subscribe_index(symbol):
+    """Chỉ số đi kênh market_index riêng, mỗi chỉ số một kênh nên không dính vấn
+    đề ghi đè của kênh tick."""
     if _client is None:
         return
     try:
-        if is_index(symbol):
-            await _client.subscribe_market_index(symbol)
-        else:
-            await _client.subscribe_trades([symbol])
-    except Exception as e:  # noqa: BLE001 — lỗi 1 mã không được làm sập stream
-        logger.warning("DNSE subscribe %s loi: %s", symbol, e)
+        await _client.subscribe_market_index(symbol)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("DNSE subscribe index %s loi: %s", symbol, e)
+
+
+async def resubscribe_all():
+    """Đăng ký lại mọi mã đang want — dùng sau khi connect/reconnect."""
+    for key in list(_refcounts):
+        if is_index(key):
+            await _subscribe_index(key)
+    await _subscribe_all_stocks()
 
 
 async def _unsubscribe_symbol(symbol):
@@ -189,7 +216,10 @@ async def want(symbol):
         n = _refcounts.get(key, 0)
         _refcounts[key] = n + 1
         if n == 0:
-            await _subscribe_symbol(key)
+            if is_index(key):
+                await _subscribe_index(key)
+            else:
+                await _subscribe_all_stocks()
 
 
 async def unwant(symbol):
@@ -206,6 +236,10 @@ async def unwant(symbol):
             return
         _refcounts.pop(key, None)
         await _unsubscribe_symbol(key)
+        if not is_index(key):
+            # Lệnh unsubscribe ở trên xoá mã khỏi danh sách kênh tick; đăng ký
+            # lại phần còn lại để danh sách luôn đầy đủ (xem _subscribe_all_stocks).
+            await _subscribe_all_stocks()
 
 
 async def start_stream(publish):
@@ -250,8 +284,7 @@ async def start_stream(publish):
 
     async with _lock:
         _client = client
-        for key in list(_refcounts):
-            await _subscribe_symbol(key)
+        await resubscribe_all()
     logger.info("DNSE v2 stream san sang (wss://ws-openapi.dnse.com.vn)")
     return True
 

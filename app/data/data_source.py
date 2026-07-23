@@ -295,6 +295,75 @@ def fetch_all_symbols(
         return None
 
 
+PUT_THROUGH_EXCHANGES = ("HOSE", "HNX", "UPCOM")
+
+
+def _default_put_through(exchange: str):
+    from vnstock_data import Trading
+
+    # Trading.put_through trả TỪNG lệnh thỏa thuận trong phiên của cả sàn (1
+    # request/sàn, không cần danh sách mã). Nguồn ASEAN trả rỗng (probe
+    # 23/07/2026) nên bảng thỏa thuận buộc phải đi qua VCI.
+    return Trading(symbol="ACB", source=VCI).put_through(exchange=exchange)
+
+
+def fetch_put_through(
+    put_through_fn: Callable = _default_put_through,
+) -> Optional[list[dict]]:
+    """Từng lệnh thỏa thuận của cả 3 sàn trong phiên hôm nay.
+
+    Trả [{symbol, exchange, value, volume, price}]; None nếu HỎNG TOÀN BỘ 3 sàn
+    (giữ last-good ở tầng trên), [] nếu phiên chưa có lệnh thỏa thuận nào. Một
+    sàn lỗi thì vẫn trả phần của các sàn còn lại — thỏa thuận HOSE là phần lớn
+    giá trị, mất HNX/UPCOM không đáng để bỏ cả biểu đồ.
+    """
+    rows: list[dict] = []
+    failed = []
+    for exchange in PUT_THROUGH_EXCHANGES:
+        try:
+            df = put_through_fn(exchange)
+        except BaseException as e:  # noqa: BLE001 — cố ý bắt cả SystemExit
+            logger.warning("put_through sàn %s thất bại: %s", exchange, _short(e))
+            failed.append(exchange)
+            continue
+        if df is None or getattr(df, "empty", False):
+            continue
+        try:
+            rows.extend(_map_put_through(df, exchange))
+        except BaseException as e:  # noqa: BLE001 — đổi shape = fetch hỏng
+            logger.warning("put_through map sàn %s thất bại: %s", exchange, _short(e))
+            failed.append(exchange)
+
+    if len(failed) == len(PUT_THROUGH_EXCHANGES):
+        return None
+    return rows
+
+
+def _map_put_through(df, exchange: str) -> list[dict]:
+    """Chuẩn hóa 1 khung lệnh thỏa thuận. Cột nguồn: symbol, price, volume,
+    match_value (giá trị của CHÍNH lệnh đó), accumulated_value (lũy kế của mã).
+
+    Dùng match_value chứ không dùng accumulated_value: hai cột này khớp nhau
+    trong probe (mọi lệnh trong phiên đều có mặt), nhưng cộng từng lệnh thì đúng
+    kể cả khi vendor cắt bớt lịch sử hay đổi nghĩa cột lũy kế.
+    """
+    out = []
+    for _, row in df.iterrows():
+        symbol = row.get("symbol")
+        if not isinstance(symbol, str) or not symbol:
+            continue
+        out.append(
+            {
+                "symbol": symbol,
+                "exchange": exchange,
+                "value": _num(row.get("match_value")),
+                "volume": _num(row.get("volume")),
+                "price": _num(row.get("price")),
+            }
+        )
+    return out
+
+
 def fetch_market_bid_ask(
     symbols: list[str],
     price_board_fn: Callable = _default_price_board,

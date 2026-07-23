@@ -84,6 +84,8 @@ def compute_period_gain(board_rows, history_candles, start, now=None, top_n=DEFA
                 closed_vnd += volume * close * _NGHIN_TO_VND
         today_vnd = row.get("value") or 0
         gia_tri_ty = round((closed_vnd + today_vnd) / _VND_TO_TY, 3)
+        if gia_tri_ty <= 0:
+            continue
 
         rows.append(
             {

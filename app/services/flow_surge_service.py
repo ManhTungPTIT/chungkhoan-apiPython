@@ -80,6 +80,8 @@ def compute_flow_surge(
             continue
 
         today_vnd = row.get("value") or 0
+        if today_vnd <= 0:
+            continue
         pct = round((today_vnd - avg_vnd) / avg_vnd * 100, 2)
 
         rows.append(

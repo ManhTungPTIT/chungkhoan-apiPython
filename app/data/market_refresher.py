@@ -55,6 +55,10 @@ _all_symbols_date = None   # ngÃƒÂ y (giÃ¡Â»Â VN) Ã„â€˜ÃƒÂ�
 # ~1 tiÃ¡ÂºÂ¿ng/lÃ¡ÂºÂ§n thay vÃƒÂ¬ mÃ¡Â»â€”i chu kÃ¡Â»Â³ 20s: dÃ¡Â»Â¯ liÃ¡Â»â€¡u Ã„â€˜Ã¡Â»â€¢i chÃ¡ÂºÂ­m, tiÃ¡ÂºÂ¿t kiÃ¡Â»â€¡m ~3 call/phÃƒÂºt.
 BOARD_VN100_INTERVAL_S = 3600
 _last_board_vn100_at = 0.0  # time.monotonic() lÃ¡ÂºÂ§n refresh board VN100 gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t (thÃƒÂ nh cÃƒÂ´ng)
+# Bảng thỏa thuận: 3 request/lượt (HOSE+HNX+UPCOM). Lệnh thỏa thuận thưa (vài
+# chục lệnh/phiên) nên 60s là quá đủ, không cần bám nhịp views 20s.
+PUT_THROUGH_INTERVAL_S = 60
+_last_put_through_at = 0.0
 RUNTIME_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "data",
@@ -216,6 +220,129 @@ def _maybe_refresh_board_vn100(now=None):
         return
     if refresh_board_vn100():
         _last_board_vn100_at = now
+
+
+SECTOR_FLOW_CACHE_FILE = os.environ.get(
+    "SECTOR_FLOW_CACHE_FILE",
+    os.path.join(RUNTIME_DATA_DIR, "sector_flow_history_cache.json"),
+)
+# Số luồng fetch history song song. Đo 23/07/2026: 8 luồng ~4 phút cho 1.596 mã
+# (16 luồng chỉ nhanh hơn ~10%, không đáng đánh đổi rủi ro bị chặn).
+SECTOR_FLOW_WORKERS = 8
+# Chỉ cần ~5 phiên gần nhất; lấy dư 20 ngày lịch để chắc chắn vượt cuối tuần và
+# nghỉ lễ dài.
+SECTOR_FLOW_LOOKBACK_DAYS = 20
+_sector_flow_date = None  # ngày (giờ VN) đã nạp history toàn thị trường xong
+
+
+def _save_sector_flow_cache(history):
+    try:
+        with open(SECTOR_FLOW_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("ghi sector flow cache thất bại: %s", e)
+
+
+def load_sector_flow_cache():
+    """Nạp lại history 5 phiên từ đĩa lúc khởi động — nếu không, mỗi lần restart
+    lại phải quét ~1.600 mã (~4 phút) trước khi hai chart 5 phiên có dữ liệu."""
+    global _sector_flow_date
+    try:
+        with open(SECTOR_FLOW_CACHE_FILE, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return None
+    history = payload.get("history") if isinstance(payload, dict) else None
+    if not history:
+        return None
+    market_cache.set_snapshot("sector_flow_history", history)
+    _sector_flow_date = payload.get("date")
+    return history
+
+
+def refresh_sector_flow():
+    """Nến ngày TOÀN thị trường cho hai chart "5 phiên gần nhất".
+
+    Đây là luồng nặng nhất của hệ thống (~1.600 request history) nên chỉ chạy MỘT
+    LẦN MỖI NGÀY và fetch song song. Mã lỗi lẻ tẻ được bỏ qua chứ không retry:
+    thiếu vài mã chỉ làm lệch nhẹ tổng ngành, còn quét lại cả rổ thì tốn thêm vài
+    phút. Ghi ra đĩa để restart không phải quét lại.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    symbols = _all_symbols_today()
+    if not symbols:
+        return False
+    # Chỉ mã cổ phiếu 3 ký tự: rổ niêm yết còn lẫn trái phiếu/chứng quyền, mà
+    # history của chúng vô nghĩa với dòng tiền theo ngành.
+    symbols = [s for s in symbols if len(s) == 3 and s.isalpha()]
+
+    today = datetime.now(VN_TZ).date()
+    start = (today - timedelta(days=SECTOR_FLOW_LOOKBACK_DAYS)).isoformat()
+    end = today.isoformat()
+
+    def fetch(symbol):
+        rows = data_source.fetch_intraday_history(symbol, start, end, "1D")
+        return symbol, rows or []
+
+    history = {}
+    with ThreadPoolExecutor(max_workers=SECTOR_FLOW_WORKERS) as pool:
+        for symbol, rows in pool.map(fetch, symbols):
+            candles = [
+                {
+                    "time": r.get("time"),
+                    "close": r.get("close"),
+                    "volume": r.get("volume"),
+                }
+                for r in rows
+                if r.get("time")
+            ]
+            if candles:
+                history[symbol] = candles
+
+    if not history:
+        return False
+    market_cache.set_snapshot("sector_flow_history", history)
+    _save_sector_flow_cache({"date": today.isoformat(), "history": history})
+    logger.info("sector flow history: %d/%d mã", len(history), len(symbols))
+    return True
+
+
+def _maybe_refresh_sector_flow(now=None):
+    """Chạy tối đa 1 lần/ngày. Chỉ dời mốc khi THÀNH CÔNG → hôm nào lỗi thì lượt
+    refresh sau thử lại thay vì đợi sang ngày mới."""
+    global _sector_flow_date
+    today = (now or datetime.now(VN_TZ)).date().isoformat()
+    if _sector_flow_date == today:
+        return
+    if refresh_sector_flow():
+        _sector_flow_date = today
+
+
+def refresh_put_through():
+    """Snapshot `put_through`: TỪNG lệnh thỏa thuận cả 3 sàn (chưa gom, chưa lọc
+    ngưỡng) để endpoint đổi min_value không phải fetch lại.
+
+    Fetch hỏng cả 3 sàn → đánh dấu stale, GIỮ bản tốt gần nhất: giá trị thỏa
+    thuận chỉ tăng dần trong phiên nên bản cũ vẫn đọc được, còn trả rỗng thì
+    biểu đồ trắng."""
+    deals = data_source.fetch_put_through()
+    if deals is None:
+        market_cache.set_snapshot("put_through", None, ok=False)
+        return False
+    market_cache.set_snapshot("put_through", deals)
+    return True
+
+
+def _maybe_refresh_put_through(now=None):
+    """Giãn nhịp bảng thỏa thuận về PUT_THROUGH_INTERVAL_S. Chỉ dời mốc khi
+    refresh THÀNH CÔNG → lần lỗi được thử lại ở lượt kế (self-heal)."""
+    global _last_put_through_at
+    now = now if now is not None else time.monotonic()
+    if now - _last_put_through_at < PUT_THROUGH_INTERVAL_S:
+        return
+    if refresh_put_through():
+        _last_put_through_at = now
 
 
 def _all_symbols_today():
@@ -429,7 +556,11 @@ def refresh_all():
     try:
         _run_step(_maybe_refresh_board_vn100)
         _run_step(refresh_tick)
+        _run_step(_maybe_refresh_put_through)
         _run_step(warm_intraday)
+        # Đặt CUỐI: bước này nặng (~4 phút), chạy trước sẽ trì hoãn mọi snapshot
+        # còn lại ở lượt refresh đầu tiên sau khi khởi động.
+        _run_step(_maybe_refresh_sector_flow)
     finally:
         _refresh_lock.release()
 

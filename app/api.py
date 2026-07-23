@@ -27,12 +27,17 @@ from app.realtime import dnse_stream
 from app.services import homepage_service
 from app.data import market_cache
 from app.data import market_refresher
+from app.services import sector_breadth_service
+from app.services import sector_flow_service
 from app.services import sector_service
 from app.services import signal_service
+from app.services import bull_bear_service
 from app.services import flow_surge_service
 from app.services import index_overview_service
 from app.services import market_status_service
 from app.services import period_gain_service
+from app.services import price_band_service
+from app.services import put_through_service
 from app.realtime import tick_hub
 from app.services import top_gain_service
 from app.services import tplus_wave_service
@@ -81,6 +86,9 @@ async def lifespan(app: FastAPI):
     # Board toàn TT (flow_surge) — nạp last-good từ đĩa để chart dòng tiền vẫn
     # hiển thị đủ universe khi boot ngoài giờ / sáng hôm sau trước giờ mở.
     market_refresher.load_market_board_full_cache()
+    # Nến ngày toàn TT cho hai chart "5 phiên gần nhất" — nạp từ đĩa để khỏi
+    # phải quét lại ~1.600 mã (~4 phút) sau mỗi lần restart.
+    market_refresher.load_sector_flow_cache()
     asyncio.create_task(signal_service.scheduler_loop())
     # LuÃ¡Â»â€œng refresh nÃ¡Â»Ân cho snapshot thÃ¡Â»â€¹ trÃ†Â°Ã¡Â»Âng dÃƒÂ¹ng chung (board VN100 + toÃƒÂ n TT +
     # nÃ¡ÂºÂ¿n mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh). TÃ¡Â»Â± warm ngay khi khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng Ã¢â€ â€™ trang cÃƒÂ³ nÃ¡Â»â„¢i dung dÃ¡Â»Â±ng sÃ¡ÂºÂµn.
@@ -200,6 +208,42 @@ def get_market_status():
     return market_status_service.get_market_status()
 
 
+@app.get("/api/python/bull-bear")
+def get_bull_bear():
+    """Chart 'DÒNG TIỀN PHE BÒ VÀ PHE GẤU': cộng giá trị khớp lệnh toàn thị
+    trường theo 5 phe (Bò Xanh/Trung lập/Gấu Đỏ/Bò Tím/Gấu Sàn) + tổng. Đọc
+    snapshot market_board_full (đã có ceiling/floor/value), không gọi vnstock."""
+    return bull_bear_service.get_bull_bear()
+
+
+@app.get("/api/python/sector-breadth")
+def get_sector_breadth():
+    """Hai chart theo ngành: 'XU HƯỚNG DÒNG TIỀN — TÍCH CỰC TIÊU CỰC NGÀNH'
+    (100% stacked ngang, ĐẾM SỐ MÃ theo 5 trạng thái giá) và 'TỔNG HỢP TĂNG GIẢM
+    THEO NGÀNH' (% thay đổi bình quân gia quyền theo tiền + GT khớp lệnh + giá
+    bình quân). Đọc snapshot market_board_full, không gọi vnstock."""
+    return sector_breadth_service.get_sector_breadth()
+
+
+@app.get("/api/python/sector-flow")
+def get_sector_flow(
+    sessions: int = Query(5, ge=2, le=20, description="Số phiên giao dịch gần nhất"),
+):
+    """Hai chart cột chồng 'GIÁ TRỊ / TỶ TRỌNG TIỀN KHỚP LỆNH N PHIÊN GẦN NHẤT':
+    mỗi cột là một phiên, mỗi khúc là một ngành ICB cấp 3. Trả cả `values` (VND)
+    lẫn `pcts` (%) để hai chart dùng chung một request. Đọc snapshot
+    sector_flow_history (market_refresher nạp 1 lần/ngày), không gọi vnstock."""
+    return sector_flow_service.get_sector_flow(sessions)
+
+
+@app.get("/api/python/price-bands")
+def get_price_bands():
+    """Chart 'DÒNG TIỀN THEO NHÓM GIÁ CỔ PHIẾU': cộng giá trị khớp lệnh toàn thị
+    trường theo khoảng giá đóng cửa (<=10K/20K/40K/60K/80K/100K/>100K) + tổng.
+    Đọc snapshot market_board_full, không gọi vnstock thêm."""
+    return price_band_service.get_price_bands()
+
+
 @app.get("/api/python/index-overview")
 def get_index_overview():
     """Chart 'CHỈ SỐ CHUNG 3 SÀN': 4 nhóm VN INDEX/HN INDEX/UP INDEX/VN30, mỗi
@@ -236,6 +280,23 @@ def get_sector_symbols(
     if snap:
         return sector_service.sector_symbols_view(snap["groups"], icb_code)
     return sector_service.get_sector_symbols(icb_code)
+
+
+@app.get("/api/python/put-through")
+def get_put_through(
+    min_value: float = Query(
+        20, ge=0, description="Ngưỡng giá trị thỏa thuận tối thiểu, đơn vị TỶ đồng"
+    ),
+):
+    """Chart 'DÒNG TIỀN GIAO DỊCH THỎA THUẬN': treemap theo mã, ô to theo giá trị
+    thỏa thuận trong phiên (KHÔNG gồm khớp lệnh). Gom từ snapshot put_through
+    (3 sàn, refresh 60s); chỉ giữ mã cổ phiếu 3 ký tự và mã đạt ngưỡng."""
+    threshold = int(min_value * 1_000_000_000)
+    deals = market_cache.get_snapshot("put_through")
+    if deals is not None:
+        imap = sector_service.get_industry_map()
+        return put_through_service.build_put_through(deals, imap, threshold)
+    return put_through_service.get_put_through(threshold)
 
 
 @app.get("/api/python/heatmap")
