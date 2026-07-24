@@ -33,6 +33,7 @@ from app.services import sector_service
 from app.services import signal_service
 from app.services import bull_bear_service
 from app.services import flow_surge_service
+from app.services import flow_surge_month_service
 from app.services import index_overview_service
 from app.services import market_status_service
 from app.services import period_gain_service
@@ -42,6 +43,7 @@ from app.realtime import tick_hub
 from app.services import top_gain_service
 from app.services import tplus_wave_service
 from app.services import vn100_service
+from app.services import vn30_basket_service
 from app.core import vnstock_license
 
 
@@ -228,6 +230,17 @@ def get_flow_surge(
     return flow_surge_service.get_flow_surge(top_n, avg_window)
 
 
+@app.get("/api/python/flow-surge-month")
+def get_flow_surge_month(
+    top_n: int = Query(20, ge=1, le=100, description="Số mã tối đa trả về"),
+    avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
+):
+    """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN SO VỚI BÌNH QUÂN 1 THÁNG': như flow-surge
+    nhưng chặt hơn — chỉ giữ mã tiền hôm nay ≥ 5 tỷ và có đủ ≥ 20 phiên nền, xếp
+    theo % tăng so với TB 20 phiên. Đọc snapshot board + nến base RAM."""
+    return flow_surge_month_service.get_flow_surge_month(top_n, avg_window)
+
+
 @app.get("/api/python/market-status")
 def get_market_status():
     """Chart 'DIỄN BIẾN THỊ TRƯỜNG': đếm số mã toàn thị trường (3 sàn gộp) theo 5
@@ -242,6 +255,15 @@ def get_bull_bear():
     trường theo 5 phe (Bò Xanh/Trung lập/Gấu Đỏ/Bò Tím/Gấu Sàn) + tổng. Đọc
     snapshot market_board_full (đã có ceiling/floor/value), không gọi vnstock."""
     return bull_bear_service.get_bull_bear()
+
+
+@app.get("/api/python/vn30-basket")
+def get_vn30_basket():
+    """Chart 'MÃ RỔ VN30': 30 mã rổ VN30 trên 4 panel dùng chung trục Y (GT khớp
+    lệnh Tỷ, giá hiện tại Nghìn, % thay đổi, cờ tăng/giảm giá). Sắp theo % thay
+    đổi giảm dần. Đọc snapshot market_board_full + danh sách VN30, không gọi
+    vnstock thêm."""
+    return vn30_basket_service.get_vn30_basket()
 
 
 @app.get("/api/python/sector-breadth")

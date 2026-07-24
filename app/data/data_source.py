@@ -517,9 +517,9 @@ def _map_board(df) -> list[dict]:
                 "exchange": _normalize_exchange(row.get(("listing", "exchange"), "")),
                 "price": price,
                 "change_pct": change_pct,
-                "ref": ref,
-                "ceiling": _num(row[("listing", "ceiling")]),
-                "floor": _num(row[("listing", "floor")]),
+                "ref": ref, #giá tham chiếu trong phiên
+                "ceiling": _num(row[("listing", "ceiling")]), #Giá trần.
+                "floor": _num(row[("listing", "floor")]),# giá sàn
                 "value": value_millions * 1_000_000,
                 # KL khá»›p tÃ­ch lÅ©y phiÃªn (cá»• phiáº¿u) â€” cho snapshot /quotes.
                 "volume": _num(row[("match", "accumulated_volume")]),
