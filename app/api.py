@@ -45,6 +45,7 @@ from app.services import tplus_wave_service
 from app.services import vn100_service
 from app.services import vn30_basket_service
 from app.core import vnstock_license
+from app.services import sector_flow_surge_service
 
 
 @asynccontextmanager
@@ -182,6 +183,14 @@ def get_top_decline_board():
         return snap["top_decline_board"]
     return vn100_service.get_top_decline_board()
 
+@app.get("/api/python/sector-flow-surge")
+def get_sector_flow_surge(
+    avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
+):
+    """Chart 'NGÀNH CÓ DÒNG TIỀN TĂNG ĐỘT BIẾN': gộp flow-surge từng mã theo
+    icb_code (ICB cấp 3), % tính trên tổng value đã cộng dồn cả ngành. Đọc
+    board + nến base RAM + bản đồ ngành memoize, không gọi vnstock thêm."""
+    return sector_flow_surge_service.get_sector_flow_surge(avg_window)
 
 @app.get("/api/python/tplus-wave")
 def get_tplus_wave(
