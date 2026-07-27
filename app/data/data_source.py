@@ -511,6 +511,13 @@ def _map_board(df) -> list[dict]:
         value_millions = row[("match", "accumulated_value")]
         if not value_millions or value_millions != value_millions:  # None/0/NaN
             value_millions = 0
+        # Khối ngoại: CÙNG DataFrame price_board này (xem _map_foreign_trade) nên
+        # map luôn ở đây là snapshot market_board_full phục vụ được cả
+        # /foreign-trading — 0 request thêm, và hai chart khối ngoại thừa hưởng
+        # cache đĩa + guard trước giờ mở phiên của snapshot. Dùng row.get như cột
+        # `exchange`: thiếu cột thì về 0, không ném KeyError làm hỏng CẢ board.
+        foreign_buy = _num(row.get(("match", "foreign_buy_value")))
+        foreign_sell = _num(row.get(("match", "foreign_sell_value")))
         out.append(
             {
                 "symbol": symbol,
@@ -528,6 +535,9 @@ def _map_board(df) -> list[dict]:
                 "high": _num(row[("match", "highest")]),
                 "low": _num(row[("match", "lowest")]),
                 "close": price,
+                "foreign_buy_value": foreign_buy,
+                "foreign_sell_value": foreign_sell,
+                "foreign_net_value": foreign_buy - foreign_sell,
             }
         )
     return out

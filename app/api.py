@@ -154,33 +154,27 @@ def get_power():
         return snap["power"]
     return vn100_service.get_power_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
 
+# Bốn view dưới đây đọc snapshot `market_board_full` bên trong vn100_service —
+# không gọi vnstock theo request. Trước đây chúng đọc market_wide["..."], nhưng
+# market_refresher chưa bao giờ ghi những key đó nên nhánh cache luôn trượt và
+# mọi request đều fetch trực tiếp; đã bỏ hẳn nhánh chết ấy.
 @app.get("/api/python/foreign-trading")
 def get_foreign_trading():
-    snap = market_cache.get_snapshot("market_wide")
-    if snap and "foreign_trading" in snap:
-        return snap["foreign_trading"]
-    return vn100_service.get_foreign_trading_board()  # fallback: cache chưa warm
+    return vn100_service.get_foreign_trading_board()
+
 
 @app.get("/api/python/top-value-board")
 def get_top_value_board():
-    snap = market_cache.get_snapshot("market_wide")
-    if snap and "top_value_board" in snap:
-        return snap["top_value_board"]
     return vn100_service.get_top_value_board()
 
 
 @app.get("/api/python/top-volume-board")
 def get_top_volume_board():
-    snap = market_cache.get_snapshot("market_wide")
-    if snap and "top_volume_board" in snap:
-        return snap["top_volume_board"]
     return vn100_service.get_top_volume_board()
+
 
 @app.get("/api/python/top-decline-board")
 def get_top_decline_board():
-    snap = market_cache.get_snapshot("market_wide")
-    if snap and "top_decline_board" in snap:
-        return snap["top_decline_board"]
     return vn100_service.get_top_decline_board()
 
 @app.get("/api/python/sector-flow-surge")
@@ -198,9 +192,10 @@ def get_tplus_wave(
         "2,3,5", description="Các cửa sổ T+ muốn xem, cách nhau dấu phẩy (vd 2,4,7)"
     ),
 ):
-    """Radar 'Các mã đang có sóng tăng T+': top mã đang buy, mức tăng cao nhất
-    trong các cửa sổ T+ tùy chọn kể từ ngày báo. Đọc cache tín hiệu + nến base
-    đã nạp trong RAM (không gọi vnstock theo request)."""
+    """Radar 'Các mã đang có sóng tăng T+': mỗi cửa sổ T+ một vùng, top mã tăng
+    mạnh nhất so với nến đã đóng lùi N+1 phiên — CÙNG định nghĩa với chart
+    /top-gain-tplus. Đọc rổ vn100 + nến base đã nạp trong RAM (không gọi vnstock
+    theo request)."""
     return tplus_wave_service.get_tplus_wave(
         windows=tplus_wave_service.parse_windows(windows)
     )
@@ -208,12 +203,13 @@ def get_tplus_wave(
 
 @app.get("/api/python/top-gain-tplus")
 def get_top_gain_tplus(
-    top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
-    window: int = Query(2, ge=2, le=5, description="Cửa sổ T+: 2 (T+2) hoặc 3 (T+3)"),
+    top_n: int = Query(20, ge=1, le=100, description="Số mã tối đa trả về"),
+    window: int = Query(2, ge=2, le=5, description="Chart T+N: 2 hoặc 3 — mốc so sánh lùi N+1 phiên"),
 ):
-    """Chart 'TOP TĂNG CAO NHẤT T+N': top mã đang HOLD đúng T+N (window), tăng giá
-    cao nhất — 3 số/mã (giá trị khớp lệnh N phiên, giá hiện tại, % tăng so ngày báo).
-    Đọc snapshot board_vn100 (đã gắn signal) + nến base RAM, không gọi vnstock."""
+    """Chart 'NHÓM TĂNG MẠNH NHẤT (NGẮN HẠN: T+N)': cả rổ vn100 (đã lọc value > 1
+    tỷ), tăng giá cao nhất so với nến đã đóng lùi N+1 phiên — 3 số/mã (giá trị khớp
+    lệnh hôm nay, giá hiện tại, % tăng).
+    Đọc snapshot view vn100 + nến base RAM, không gọi vnstock."""
     return top_gain_service.get_top_gain(top_n, window=window)
 
 
@@ -222,9 +218,12 @@ def get_top_gain_period(
     period: str = Query("week", pattern="^(week|month)$", description="Kỳ: week / month"),
     top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
 ):
-    """Chart 'TOP TĂNG CAO NHẤT TUẦN/THÁNG': toàn board sắp theo % tăng trong kỳ
-    (so giá hiện tại với close phiên đầu kỳ) — 3 số/mã (value cộng dồn trong kỳ,
-    giá hiện tại, % tăng). Đọc snapshot board + nến base RAM, không gọi vnstock."""
+    """Chart 'TOP TĂNG MẠNH NHẤT TUẦN/THÁNG': cả rổ vn100 sắp theo % tăng trong kỳ
+    (so giá hiện tại với close phiên ĐẦU cửa sổ) — 3 số/mã (value cộng dồn trong
+    cửa sổ, giá hiện tại, % tăng).
+    week = 5 phiên ĐÃ ĐÓNG gần nhất, không tính phiên hôm nay; month = theo lịch
+    (mùng 1 → phiên đã đóng gần nhất). Đọc rổ vn100 + nến base RAM, không gọi
+    vnstock."""
     return period_gain_service.get_period_gain(period, top_n)
 
 
