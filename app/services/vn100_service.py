@@ -1,16 +1,20 @@
-"""Phục vụ bảng giá rổ VNALL + toàn sàn HNX (~593 mã) — gọi vnstock trực tiếp,
-không cache.
+"""Phục vụ bảng giá rổ VNALL + toàn sàn HNX (~593 mã).
 
 Tên module/endpoint giữ `vn100` cho tương thích (trước đây rổ VN100); nội dung
 đã mở rộng lên VNALL + HNX. Danh sách mã thay đổi rất hiếm (~mỗi quý) nên được
-memoize ở biến module-level: lấy 1 lần rồi giữ trong RAM. Mỗi lần lấy bảng giá
-là 1 request `price_board` cho toàn bộ mã. Fetch hỏng (rate-limit/mạng) → trả
+memoize ở biến module-level: lấy 1 lần rồi giữ trong RAM.
+
+Bốn view top-value / top-volume / top-decline / khối ngoại ĐỌC snapshot
+`market_board_full` (xem `_full_board`), không gọi vnstock theo request; fetch
+trực tiếp chỉ còn là fallback lúc snapshot chưa có. Các hàm còn lại vẫn fetch mỗi
+lần gọi: 1 request `price_board` cho toàn bộ mã, hỏng (rate-limit/mạng) → trả
 {data: []}.
 """
 
 from datetime import datetime, timedelta, timezone
 
 from app.data import data_source
+from app.data import market_cache
 
 VALUE_THRESHOLD = 1_000_000_000
 VN_TZ = timezone(timedelta(hours=7))
@@ -202,12 +206,57 @@ def get_power_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
         return {"data": []}
     return build_power_board(board)
 
-def get_foreign_trading_board(fetch_fn=data_source.fetch_foreign_board, top_n=20) -> dict:
-    """Lấy payload /foreign-trading trực tiếp (fallback khi cache market_wide trống):
-    1 request lấy giá trị mua/bán ròng khối ngoại cho rổ VN100 → build_foreign_trading_board.
+# ─── Đọc board từ cache dùng chung ────────────────────────────────────────
+# Bốn view dưới đây (top-value / top-volume / top-decline / khối ngoại) dựng từ
+# snapshot `market_board_full` mà market_refresher đã cập nhật sẵn: 0 request
+# vnstock theo user, và thừa hưởng nguyên ba lớp của snapshot đó — RAM last-good,
+# guard trước giờ mở phiên (_board_has_trades giữ dữ liệu phiên trước thay vì ghi
+# đè bằng board value=0), cache đĩa nạp lúc boot.
+#
+# Đổi lại, snapshot rộng hơn universe của từng view (toàn TT ~1.600 mã, CÓ UPCOM)
+# nên mỗi view phải tự lọc về đúng rổ của mình, nếu không số liệu sẽ đổi.
 
-    Members chưa lấy được / fetch lỗi → {buy: [], sell: []} (lần poll sau tự lành —
-    FE KHÔNG giữ data cũ, response rỗng vẫn ghi đè cache react-query)."""
+
+def _full_board() -> list[dict]:
+    return market_cache.get_snapshot("market_board_full") or []
+
+
+def _in_basket(board: list[dict], basket: list[str]) -> list[dict]:
+    """Lọc board theo rổ. Rổ rỗng (listing hỏng) → GIỮ NGUYÊN board: trả rỗng là
+    chart trắng, còn giữ board thì vẫn đọc được và tự lành khi memoize lấy được
+    rổ ở chu kỳ sau (cùng tinh thần build_power_board)."""
+    if not basket:
+        return board
+    members = set(basket)
+    return [r for r in board if r["symbol"] in members]
+
+
+def _vn100_rows(board: list[dict]) -> list[dict]:
+    return _in_basket(board, get_vn100_members())
+
+
+def _watchlist_rows(board: list[dict]) -> list[dict]:
+    """Rổ của /top-decline: VNALL + toàn sàn HNX (~593 mã) — KHÔNG có UPCOM. Bỏ
+    bước lọc này là UPCOM (biên độ ±15% so với ±7% HOSE) chiếm gần hết bảng giảm
+    mạnh nhất."""
+    return _in_basket(board, get_symbols())
+
+
+def get_foreign_trading_board(fetch_fn=data_source.fetch_foreign_board, top_n=20) -> dict:
+    """Payload /foreign-trading từ snapshot market_board_full, lọc về rổ VN100.
+
+    Fetch trực tiếp chỉ còn là fallback, cho hai trường hợp:
+    - snapshot rỗng — boot lần đầu, chưa có file cache đĩa;
+    - snapshot có row nhưng KHÔNG row nào mang foreign_net_value — file
+      market_board_full_cache.json ghi trước khi _map_board cõng field khối
+      ngoại. Không có nhánh này thì hai chart trắng tới lần ghi đĩa đầu tiên của
+      phiên. Lưu ý phân biệt THIẾU KEY với net=0 (mã không có giao dịch khối
+      ngoại) — net=0 là dữ liệu hợp lệ, không được fetch lại.
+    """
+    rows = _vn100_rows(_full_board())
+    if any("foreign_net_value" in r for r in rows):
+        return build_foreign_trading_board(rows, top_n=top_n)
+
     members = get_vn100_members()
     if not members:
         return {"buy": [], "sell": []}
@@ -278,8 +327,11 @@ def _value_payload(rows: list[dict]) -> dict:
     }
 
 def get_top_value_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> dict:
-    """Lấy payload /top-value trực tiếp (fallback khi cache market_wide trống).
-    Members chưa lấy được / fetch lỗi → {data: []} (tự lành ở chu kỳ sau)."""
+    """Payload /top-value từ snapshot market_board_full, lọc về rổ VN100.
+    Snapshot rỗng (boot lần đầu, chưa có cache đĩa) → fetch trực tiếp."""
+    rows = _full_board()
+    if rows:
+        return build_top_value_board(_vn100_rows(rows), top_n=top_n)
     members = get_vn100_members()
     if not members:
         return {"data": []}
@@ -289,7 +341,10 @@ def get_top_value_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> dic
     return build_top_value_board(board, top_n=top_n)
 
 def get_top_volume_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> dict:
-    """Lấy payload /top-volume trực tiếp (fallback khi cache market_wide trống)."""
+    """Payload /top-volume từ snapshot market_board_full, lọc về rổ VN100."""
+    rows = _full_board()
+    if rows:
+        return build_top_volume_board(_vn100_rows(rows), top_n=top_n)
     members = get_vn100_members()
     if not members:
         return {"data": []}
@@ -311,11 +366,12 @@ def build_top_decline_board(board: list[dict], top_n=30) -> dict:
 
 
 def get_top_decline_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> dict:
-    """Lấy payload /top-decline-board trực tiếp (fallback khi cache market_wide
-    trống): 1 request price_board cho TOÀN thị trường (get_symbols() — cùng
-    universe với /vn100, KHÔNG dùng get_vn100_members()) → build_top_decline_board.
-
-    Chưa có danh sách / fetch lỗi → {data: []} (tự lành ở chu kỳ sau)."""
+    """Payload /top-decline-board từ snapshot market_board_full, lọc về rổ
+    get_symbols() (VNALL + toàn sàn HNX — cùng universe với /vn100, KHÔNG dùng
+    get_vn100_members()). Snapshot rỗng → fetch trực tiếp."""
+    rows = _full_board()
+    if rows:
+        return build_top_decline_board(_watchlist_rows(rows), top_n=top_n)
     symbols = get_symbols()
     if not symbols:
         return {"data": []}
