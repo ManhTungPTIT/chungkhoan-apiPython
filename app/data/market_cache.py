@@ -92,6 +92,13 @@ def set_intraday(symbol, interval, result):
         _intraday[(symbol, interval)] = {"data": result, "fetched_at": time.time()}
 
 
+def peek_intraday(symbol, interval):
+    """Đọc bản intraday đang có trong RAM, không fetch mới dù cache hết TTL."""
+    with _intraday_lock:
+        entry = _intraday.get((symbol, interval))
+        return entry["data"] if entry else None
+
+
 def get_intraday(symbol, interval, fetch_fn=None):
     """Trả nến cho (symbol, interval) từ cache; miss/hết hạn → fetch đúng 1 lần.
 

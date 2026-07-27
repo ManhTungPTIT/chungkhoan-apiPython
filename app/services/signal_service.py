@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from app.data import data_source
+from app.data import data_source, market_cache
 from app.services import vn100_service
 
 logger = logging.getLogger(__name__)
@@ -316,7 +316,7 @@ def _trading_sessions_since(signal_date, now=None, candles=None):
     day_after_start = start + timedelta(days=1)
     if candles:
         try:
-            dates = [date.fromisoformat(str(c["time"])[:10]) for c in candles]
+            dates = [date.fromisoformat(_candle_date(c["time"])) for c in candles]
         except (KeyError, TypeError, ValueError):
             dates = []
         if dates and dates[0] <= start:
@@ -609,6 +609,64 @@ def _merge_today(base, live):
     return base + [live]
 
 
+def _last_candle_date(candles):
+    if not candles:
+        return None
+    try:
+        return date.fromisoformat(_candle_date(candles[-1]["time"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _previous_weekday(day):
+    prev = day - timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= timedelta(days=1)
+    return prev
+
+
+def _cached_closed_daily_candles(symbol, today):
+    payload = market_cache.peek_intraday(symbol, "1d")
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    candles = _to_candles(rows or [])
+    if not candles:
+        return []
+    today_date = date.fromisoformat(today)
+    return [
+        candle
+        for candle in candles
+        if date.fromisoformat(_candle_date(candle["time"])) < today_date
+    ]
+
+
+def _refresh_base_from_intraday_cache(symbol, base, today):
+    """Nếu chart đã tải /intraday 1d mới hơn base signal, dùng nến đã đóng đó.
+
+    /intraday và FE dùng cùng công thức nến ngày. Đọc cache RAM, không fetch mới,
+    để tránh attach_signals(/vn100) tạo thêm hàng trăm request history.
+    """
+    cached = _cached_closed_daily_candles(symbol, today)
+    if not cached:
+        return base
+    cached_last = _last_candle_date(cached)
+    base_last = _last_candle_date(base)
+    if cached_last and (base_last is None or cached_last > base_last):
+        _history_candles[symbol] = cached
+        return cached
+    return base
+
+
+def _base_stale_for_live(base, today):
+    """Không tính live trên base thiếu phiên đã đóng gần nhất.
+
+    Ví dụ thứ Hai 27/07 mà base mới tới 23/07 thì ghép live 27/07 sẽ báo BUY
+    sai thành T+0, trong khi nến 24/07 đã là điểm BUY đúng theo FE.
+    """
+    last = _last_candle_date(base)
+    if last is None:
+        return True
+    return last < _previous_weekday(date.fromisoformat(today))
+
 def _phantom_candle(last, live, today):
     """Nến live sắp bị NỐI như phiên mới trong khi hôm nay thật ra KHÔNG có dữ
     liệu mới → nến ma (bản sao phiên trước) làm SMA20/MACD lệch → tín hiệu giả.
@@ -640,6 +698,9 @@ def _live_signal(symbol, row, today):
     base = _history_candles.get(symbol)
     live = _live_candle(row, today)
     if not base or live is None:
+        return None
+    base = _refresh_base_from_intraday_cache(symbol, base, today)
+    if _base_stale_for_live(base, today):
         return None
     if _phantom_candle(base[-1], live, today):
         return None
