@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from app.data import data_source
+from app.services import foreign_trading_service
 from app.services import homepage_service
 from app.data import market_cache
 from app.services import sector_service
@@ -558,6 +559,7 @@ def refresh_tick(build_views=True):
     # có giao dịch) → giữ last-good, không ghi đè bằng board value=0.
     if not preopen:
         market_cache.set_snapshot("market_board_full", snap["board"])
+        foreign_trading_service.update_history_from_board(snap["board"])
         global _last_full_board_save_at
         now_mono = time.monotonic()
         if now_mono - _last_full_board_save_at > FULL_BOARD_SAVE_INTERVAL_S:
