@@ -44,6 +44,7 @@ from app.services import top_gain_service
 from app.services import tplus_wave_service
 from app.services import vn100_service
 from app.services import vn30_basket_service
+from app.services import foreign_trading_service
 from app.core import vnstock_license
 from app.services import sector_flow_surge_service
 
@@ -86,6 +87,7 @@ async def lifespan(app: FastAPI):
     # crash/--reload) vÃ¡ÂºÂ«n tÃƒÂ­nh Ã„â€˜Ã†Â°Ã¡Â»Â£c tÃƒÂ­n hiÃ¡Â»â€¡u live theo giÃƒÂ¡ hiÃ¡Â»â€¡n tÃ¡ÂºÂ¡i ngay, thay
     # vÃƒÂ¬ Ã„â€˜ÃƒÂ³ng bÃ„Æ’ng Ã¡Â»Å¸ tÃƒÂ­n hiÃ¡Â»â€¡u cache cÃ…Â© tÃ¡Â»â€ºi tÃ¡ÂºÂ­n 15:05.
     signal_service.load_history_cache()
+    foreign_trading_service.load_history_cache()
     # Board toàn TT (flow_surge) — nạp last-good từ đĩa để chart dòng tiền vẫn
     # hiển thị đủ universe khi boot ngoài giờ / sáng hôm sau trước giờ mở.
     market_refresher.load_market_board_full_cache()
@@ -162,6 +164,13 @@ def get_power():
 def get_foreign_trading():
     return vn100_service.get_foreign_trading_board()
 
+
+@app.get("/api/python/foreign-trading-history")
+def get_foreign_trading_history():
+    """30 phiên gần nhất: tổng mua/bán ròng khối ngoại VN100 + summary hiện tại."""
+    history = foreign_trading_service.get_history_with_fallback()
+    current = history[-1] if history else foreign_trading_service.get_current_summary()
+    return {"history": history, "current": current}
 
 @app.get("/api/python/top-value-board")
 def get_top_value_board():
