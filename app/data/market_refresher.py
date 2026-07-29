@@ -23,6 +23,7 @@ market_wide (_vn100_view) để signal cắt trong phiên không bị đóng bă
 import asyncio
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -236,6 +237,43 @@ SECTOR_FLOW_LOOKBACK_DAYS = 20
 _sector_flow_date = None  # ngày (giờ VN) đã nạp history toàn thị trường xong
 
 
+def _finite(value):
+    """Chuỗi vendor → float, None nếu không phải số hữu hạn ('nan', '', None)."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _normalize_candles(rows):
+    """Nến ngày rút gọn cho snapshot `sector_flow_history`, close/volume ép về SỐ.
+
+    `data_source._map_history` ép cả DataFrame về chuỗi (`df.astype(str)`) nên
+    vendor trả close "25.5" / volume "1101". Consumer nhân thẳng close × volume
+    (index_overview_service) sẽ nổ TypeError. Ép ngay tại chỗ sinh snapshot —
+    đúng cách signal_service làm khi dựng `_history_candles` — để không service
+    nào phải tự nhớ ép kiểu.
+
+    Bỏ nến thiếu time hoặc close hỏng ('nan' khi vendor pad ngày nghỉ); volume
+    thiếu tính là 0 (không có giao dịch), giống cách các service đọc nến.
+    """
+    out = []
+    for row in rows or []:
+        time_value = row.get("time")
+        close = _finite(row.get("close"))
+        if not time_value or close is None:
+            continue
+        out.append(
+            {
+                "time": time_value,
+                "close": close,
+                "volume": int(_finite(row.get("volume")) or 0),
+            }
+        )
+    return out
+
+
 def _save_sector_flow_cache(history):
     try:
         with open(SECTOR_FLOW_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -253,7 +291,17 @@ def load_sector_flow_cache():
             payload = json.load(f)
     except (OSError, ValueError):
         return None
-    history = payload.get("history") if isinstance(payload, dict) else None
+    raw = payload.get("history") if isinstance(payload, dict) else None
+    if not raw:
+        return None
+    # Cache ghi trước bản vá kiểu dữ liệu vẫn còn chuỗi, mà restart thì nạp thẳng
+    # từ đĩa chứ không chạy lại refresh — không chuẩn hoá ở đây là chart hỏng tới
+    # tận lượt quét ngày hôm sau.
+    history = {}
+    for symbol, rows in raw.items():
+        candles = _normalize_candles(rows)
+        if candles:
+            history[symbol] = candles
     if not history:
         return None
     market_cache.set_snapshot("sector_flow_history", history)
@@ -289,15 +337,7 @@ def refresh_sector_flow():
     history = {}
     with ThreadPoolExecutor(max_workers=SECTOR_FLOW_WORKERS) as pool:
         for symbol, rows in pool.map(fetch, symbols):
-            candles = [
-                {
-                    "time": r.get("time"),
-                    "close": r.get("close"),
-                    "volume": r.get("volume"),
-                }
-                for r in rows
-                if r.get("time")
-            ]
+            candles = _normalize_candles(rows)
             if candles:
                 history[symbol] = candles
 

@@ -58,9 +58,13 @@ def build_sector_breadth(board_rows, industry_map: dict | None = None) -> dict:
     """board_rows: market_board_full ({symbol, price, ref, ceiling, floor, value,
     volume}). Trả {industries: [...]} — mỗi ngành đủ số liệu cho CẢ HAI chart.
 
-    Ngành xếp theo (%trần + %tăng) giảm dần: đọc từ trên xuống là dải màu chuyển
-    dần từ xanh sang đỏ, thấy ngay ngành nào khỏe nhất. (Bản mẫu xếp theo quy mô
-    ngành — đổi ở đây nếu muốn.)
+    Ngành xếp theo TỔNG GIÁ TRỊ KHỚP LỆNH giảm dần: đọc từ trên xuống là đi từ
+    ngành hút tiền nhất tới ngành gần như không giao dịch, và hai chart luôn cùng
+    một thứ tự hàng nên so ngang được. Đây là thứ tự DUY NHẤT cho cả hai chart —
+    FE không sắp lại, muốn đổi thì đổi ở đây.
+
+    Chốt hạ ties bằng số mã: các ngành value = 0 (chưa giao dịch) mới đụng nhau,
+    xếp ngành nhiều mã lên trước cho kết quả ổn định giữa các lần refresh.
     """
     imap = industry_map or {}
     groups: dict[str, dict] = {}
@@ -119,7 +123,7 @@ def build_sector_breadth(board_rows, industry_map: dict | None = None) -> dict:
             }
         )
 
-    industries.sort(key=lambda g: g["pcts"]["limit_up"] + g["pcts"]["up"], reverse=True)
+    industries.sort(key=lambda g: (g["value"], g["count"]), reverse=True)
     return {"industries": industries}
 
 

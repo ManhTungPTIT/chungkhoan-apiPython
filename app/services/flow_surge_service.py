@@ -1,21 +1,56 @@
 """Chart "DÒNG TIỀN TĂNG ĐỘT BIẾN NỔI BẬT HÔM NAY" — đo mức đột biến thanh khoản
 trong 1 phiên (KHÔNG phải biến động giá).
 
-Khác biệt cốt lõi: cột xanh = % tăng DÒNG TIỀN = (value hôm nay − trung bình value
-N phiên gần nhất) / trung bình × 100 → mã hôm nay giao dịch gấp nhiều lần bình
-thường thì % này bắn rất cao. Cột tím = value RIÊNG hôm nay (không cộng dồn).
+Khác biệt cốt lõi: cột xanh = % tăng DÒNG TIỀN = (value hôm nay − NỀN) / NỀN × 100
+→ mã hôm nay giao dịch gấp nhiều lần bình thường thì % này bắn rất cao. Cột tím =
+value RIÊNG hôm nay (không cộng dồn).
+
+NỀN = TB value N phiên gần nhất × tỉ lệ theo KHUNG GIỜ (xem `BASELINE_CURVE`).
 
 Đọc cùng cache RAM (market_wide/board_vn100 + _history_candles), không gọi vnstock.
 value phiên nền = volume × close × 1000 (close nghìn đồng → VND); value hôm nay lấy
 trực tiếp từ board (VND).
 """
 
-from datetime import datetime
+from datetime import datetime, time
 
 from app.services import signal_service
 
 DEFAULT_TOP_N = 30
 DEFAULT_AVG_WINDOW = 20  # số phiên nền để tính trung bình (spec: ví dụ 10 hoặc 20)
+
+# Nền so sánh theo KHUNG GIỜ. TB20 là dòng tiền TRỌN phiên, còn value hôm nay mới
+# tích luỹ được một phần → so thẳng thì 9h30 mã nào cũng âm sâu, 14h30 lại dương
+# ảo. Mỗi khung giờ chỉ so với phần TB20 mà một phiên bình thường đã khớp được
+# tới thời điểm đó:
+#   09:00–10:00 → 20% TB20 | 10:00–11:30 → 45% | 13:00–14:00 → 70% | 14:00–15:00 → 100%
+# Mốc trong bảng là ĐẦU khung và có hiệu lực tới mốc kế tiếp, nên 3 quãng bảng
+# không liệt kê được phủ luôn:
+#   - trước 09:00 (gồm ATO) giữ 20% → mẫu số không bao giờ bằng 0;
+#   - nghỉ trưa 11:30–13:00 giữ 45% vì tiền đứng yên từ 11:30, đổi nền sẽ làm %
+#     nhảy dù không có lệnh nào khớp;
+#   - sau 15:00 giữ 100% — phiên đã đóng, so trọn phiên mới đúng.
+BASELINE_CURVE = (
+    (time(0, 0), "09:00–10:00", 0.20),
+    (time(10, 0), "10:00–11:30", 0.45),
+    (time(13, 0), "13:00–14:00", 0.70),
+    (time(14, 0), "14:00–15:00", 1.00),
+)
+
+
+def baseline_bucket(now):
+    """(nhãn khung giờ, tỉ lệ TB20 dùng làm nền) tại thời điểm `now` (giờ VN).
+
+    Lấy khung CUỐI CÙNG có mốc bắt đầu ≤ `now` — biên là nửa mở, đúng 10:00 đã
+    thuộc khung 10:00–11:30."""
+    current = now.time()
+    label, factor = BASELINE_CURVE[0][1], BASELINE_CURVE[0][2]
+    for start, bucket_label, bucket_factor in BASELINE_CURVE:
+        if current < start:
+            break
+        label, factor = bucket_label, bucket_factor
+    return label, factor
+
 
 # Lọc chất lượng để bỏ penny tăng đột biến:
 #  - MIN_BASELINE_VND: TB value NỀN tối thiểu → mã phải vốn dĩ có dòng tiền thật;
@@ -53,9 +88,10 @@ def compute_flow_surge(
 ):
     """Hàm thuần: board_rows (symbol/price/value hôm nay) + history_candles
     ({mã: [nến ngày có volume]}). Lọc penny bằng min_base_vnd (TB nền) và
-    min_price_vnd (giá). Trả {rows, avg_window}."""
+    min_price_vnd (giá). Trả {rows, avg_window, baseline_factor, time_bucket}."""
     now = now or datetime.now(signal_service.VN_TZ)
     scale = signal_service.PRICE_BOARD_SCALE
+    time_bucket, factor = baseline_bucket(now)
 
     rows = []
     for row in board_rows or []:
@@ -67,9 +103,12 @@ def compute_flow_surge(
         if not avg_vnd or avg_vnd <= 0:
             continue
         # Sàn thanh khoản NỀN — loại penny có TB dòng tiền quá nhỏ (tỷ lệ % bắn
-        # ảo cao dù tiền tuyệt đối không đáng kể).
+        # ảo cao dù tiền tuyệt đối không đáng kể). Chấm trên TB TRỌN phiên chứ
+        # không phải nền đã scale: đây là bộ lọc về thanh khoản vốn có của mã,
+        # không được nới lỏng dần theo giờ trong ngày.
         if avg_vnd < min_base_vnd:
             continue
+        base_vnd = avg_vnd * factor   # > 0 vì factor nhỏ nhất là 0.20
 
         price = row.get("price") or 0
         gia_hien_tai = price / scale if price > 0 else candles[-1].get("close", 0)
@@ -82,7 +121,7 @@ def compute_flow_surge(
         today_vnd = row.get("value") or 0
         if today_vnd <= 0:
             continue
-        pct = round((today_vnd - avg_vnd) / avg_vnd * 100, 2)
+        pct = round((today_vnd - base_vnd) / base_vnd * 100, 2)
 
         rows.append(
             {
@@ -94,7 +133,12 @@ def compute_flow_surge(
         )
 
     rows.sort(key=lambda r: r["pct_tang"], reverse=True)
-    return {"rows": rows[:top_n], "avg_window": avg_window}
+    return {
+        "rows": rows[:top_n],
+        "avg_window": avg_window,
+        "time_bucket": time_bucket,
+        "baseline_factor": factor,
+    }
 
 
 def get_flow_surge(top_n=DEFAULT_TOP_N, avg_window=DEFAULT_AVG_WINDOW):

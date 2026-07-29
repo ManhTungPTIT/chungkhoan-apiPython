@@ -248,7 +248,9 @@ def get_flow_surge(
     avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
 ):
     """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN HÔM NAY': toàn board sắp theo % tăng dòng
-    tiền = (value hôm nay − trung bình value N phiên) / trung bình × 100. Cột tím
+    tiền = (value hôm nay − nền) / nền × 100, với nền = trung bình value N phiên
+    × tỉ lệ theo KHUNG GIỜ (20% trước 10:00 / 45% tới 13:00 / 70% tới 14:00 /
+    100% từ 14:00) để tiền mới chạy nửa phiên không bị so với trọn phiên. Cột tím
     là value riêng hôm nay. Đọc snapshot board + nến base RAM, không gọi vnstock."""
     return flow_surge_service.get_flow_surge(top_n, avg_window)
 
