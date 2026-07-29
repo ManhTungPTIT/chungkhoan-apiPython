@@ -380,6 +380,31 @@ def get_top_decline_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> d
         return {"data": []}
     return build_top_decline_board(board, top_n=top_n)
 
+def build_top_advance_board(board: list[dict], top_n=30) -> dict:
+    """Top N mã tăng giá mạnh nhất (change_pct lớn nhất) — bản đối xứng của
+    build_top_decline_board: cùng rổ, cùng bộ lọc, chỉ đảo chiều sort.
+
+    Cũng chỉ lấy mã ĐÃ KHỚP LỆNH (price > 0): mã chưa khớp có change_pct=0 do
+    thiếu ref nên không phải "đứng giá" thật."""
+    traded = [x for x in board if (x.get("price") or 0) > 0]
+    rows = sorted(traded, key=lambda x: x.get("change_pct") or 0, reverse=True)[:top_n]
+    return _value_payload(rows)
+
+
+def get_top_advance_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> dict:
+    """Payload /top-advance-board — cùng nguồn và cùng rổ với /top-decline-board
+    (snapshot market_board_full lọc về get_symbols(): VNALL + toàn sàn HNX)."""
+    rows = _full_board()
+    if rows:
+        return build_top_advance_board(_watchlist_rows(rows), top_n=top_n)
+    symbols = get_symbols()
+    if not symbols:
+        return {"data": []}
+    board = fetch_fn(symbols)
+    if board is None:
+        return {"data": []}
+    return build_top_advance_board(board, top_n=top_n)
+
 def get_board(fetch_fn=data_source.fetch_vn100_board) -> dict:
     """Lấy bảng VN100 trực tiếp: 1 request price_board → lọc + sort + gắn tín hiệu."""
     symbols = get_symbols()

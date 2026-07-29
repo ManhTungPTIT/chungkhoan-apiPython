@@ -1,8 +1,8 @@
 """Chart "TOP TĂNG MẠNH NHẤT TUẦN" (và biến thể THÁNG) — toàn rổ sắp theo % tăng
 trong kỳ.
 
-Khác top_gain_service (cửa sổ đo bằng ĐỘ LÙI cố định): ở đây cửa sổ là một DẢI
-phiên, cột value cộng dồn cả dải.
+Khác top_gain_service (mốc so sánh là TRUNG BÌNH N phiên): ở đây mốc là close
+phiên ĐẦU của một DẢI phiên, cột value cộng dồn cả dải.
 
 Kỳ `week` (2026-07-27 đổi): **5 phiên ĐÃ ĐÓNG gần nhất, KHÔNG tính phiên hôm
 nay**. Trước đây là "từ thứ Hai tuần này" — cách đó làm chart TRỐNG nguyên ngày

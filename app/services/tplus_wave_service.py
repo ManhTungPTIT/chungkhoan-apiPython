@@ -4,11 +4,12 @@ Dùng CHUNG một định nghĩa với hai chart "NHÓM TĂNG MẠNH NHẤT (NG�
 service này chỉ gọi lại `top_gain_service.compute_top_gain` cho từng cửa sổ rồi
 xếp kết quả thành các VÙNG của radar. Nhờ vậy vùng T+2 / T+3 của radar luôn là
 top của đúng bảng xếp hạng mà hai chart kia hiển thị, T+5 chạy cùng công thức
-chỉ khác độ lùi.
+chỉ khác độ dài cửa sổ trung bình.
 
 Nhắc lại định nghĩa (chi tiết ở top_gain_service):
   - Rổ mã = nguyên rổ view vn100 (đã lọc value > 1 tỷ + carry-over).
-  - t{N} = (giá hiện tại − close nến đã đóng lùi N+1 phiên) / close đó × 100.
+  - t{N} = (giá hiện tại − base) / base × 100, base = trung bình N giá gồm close
+    của (N − 1) phiên ĐÃ ĐÓNG gần nhất và giá hiện tại.
 
 Vì tính theo %, đơn vị giá của nến (nghìn đồng) không ảnh hưởng.
 Mỗi vùng lấy top `zone_n` mã sort theo CHÍNH cửa sổ đó, chỉ giữ mức tăng > 0 —
@@ -106,7 +107,8 @@ def compute_tplus_wave(
 
 def get_tplus_wave(top_n=DEFAULT_TOP_N, windows=WINDOWS, zone_n=DEFAULT_ZONE_N):
     """Điểm gọi runtime: đọc rổ vn100 + nến base đã nạp sẵn trong RAM (cùng
-    nguồn với chart T+2/T+3). `windows` = các cửa sổ T+ muốn xem."""
+    nguồn với chart T+2/T+3). `windows` = các cửa sổ T+ muốn xem (windows=1 suy
+    biến về 0% cho mọi mã — trung bình 1 giá chính là giá hiện tại)."""
     history = getattr(signal_service, "_history_candles", None) or {}
     result = compute_tplus_wave(
         top_gain_service.board_rows(), history, top_n=top_n, windows=windows, zone_n=zone_n

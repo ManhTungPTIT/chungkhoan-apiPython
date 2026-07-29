@@ -186,6 +186,11 @@ def get_top_volume_board():
 def get_top_decline_board():
     return vn100_service.get_top_decline_board()
 
+
+@app.get("/api/python/top-advance-board")
+def get_top_advance_board():
+    return vn100_service.get_top_advance_board()
+
 @app.get("/api/python/sector-flow-surge")
 def get_sector_flow_surge(
     avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
@@ -202,7 +207,7 @@ def get_tplus_wave(
     ),
 ):
     """Radar 'Các mã đang có sóng tăng T+': mỗi cửa sổ T+ một vùng, top mã tăng
-    mạnh nhất so với nến đã đóng lùi N+1 phiên — CÙNG định nghĩa với chart
+    mạnh nhất so với trung bình N phiên — CÙNG định nghĩa với chart
     /top-gain-tplus. Đọc rổ vn100 + nến base đã nạp trong RAM (không gọi vnstock
     theo request)."""
     return tplus_wave_service.get_tplus_wave(
@@ -213,11 +218,12 @@ def get_tplus_wave(
 @app.get("/api/python/top-gain-tplus")
 def get_top_gain_tplus(
     top_n: int = Query(20, ge=1, le=100, description="Số mã tối đa trả về"),
-    window: int = Query(2, ge=2, le=5, description="Chart T+N: 2 hoặc 3 — mốc so sánh lùi N+1 phiên"),
+    window: int = Query(2, ge=2, le=5, description="Chart T+N: mốc so sánh = trung bình N giá (N−1 close gần nhất + giá hiện tại)"),
 ):
     """Chart 'NHÓM TĂNG MẠNH NHẤT (NGẮN HẠN: T+N)': cả rổ vn100 (đã lọc value > 1
-    tỷ), tăng giá cao nhất so với nến đã đóng lùi N+1 phiên — 3 số/mã (giá trị khớp
-    lệnh hôm nay, giá hiện tại, % tăng).
+    tỷ), tăng giá cao nhất so với trung bình N giá — gồm close của (N−1) phiên đã
+    đóng gần nhất và giá hiện tại — 3 số/mã (giá trị khớp lệnh hôm nay, giá hiện
+    tại, % tăng).
     Đọc snapshot view vn100 + nến base RAM, không gọi vnstock."""
     return top_gain_service.get_top_gain(top_n, window=window)
 
