@@ -1,25 +1,25 @@
 """Hai chart "GIÁ TRỊ TIỀN KHỚP LỆNH 5 PHIÊN GẦN NHẤT" và "TỶ TRỌNG ..." — cột
-chồng theo ngành, mỗi cột là một phiên.
+chá»“ng theo ngÃ nh, má»—i cá»™t lÃ  má»™t phiÃªn.
 
 Cùng một payload phục vụ cả hai chart: chart trái đọc `value`, chart phải đọc
-`pct`. Tự chuẩn hóa nên tổng mỗi phiên luôn đúng 100%, không cần cột "Tổng".
+`pct`. Tá»± chuáº©n hÃ³a nÃªn tá»•ng má»—i phiÃªn luÃ´n Ä‘Ãºng 100%, khÃ´ng cáº§n cá»™t "Tá»•ng".
 
 Ba điều quyết định tính đúng đắn của chart:
 
-1. **5 phiên GIAO DỊCH gần nhất, không phải 5 ngày lịch.** Lấy tập ngày thật có
-   trong nến rồi cắt 5 ngày cuối — `today - 5 days` sẽ dính cuối tuần/nghỉ lễ và
-   ra cột rỗng.
+1. **5 phiÃªn GIAO Dá»ŠCH gáº§n nháº¥t, khÃ´ng pháº£i 5 ngÃ y lá»‹ch.** Láº¥y táº­p ngÃ y tháº­t cÃ³
+   trong náº¿n rá»“i cáº¯t 5 ngÃ y cuá»‘i â€” `today - 5 days` sáº½ dÃ­nh cuá»‘i tuáº§n/nghá»‰ lá»… vÃ 
+   ra cá»™t rá»—ng.
 
 2. **Thứ tự ngành CỐ ĐỊNH và giống hệt nhau ở cả 5 cột lẫn cả 2 chart.** Xếp theo
-   tổng giá trị của CẢ 5 PHIÊN, không xếp theo giá trị từng ngày — nếu mỗi cột
+   tá»•ng giÃ¡ trá»‹ cá»§a Cáº¢ 5 PHIÃŠN, khÃ´ng xáº¿p theo giÃ¡ trá»‹ tá»«ng ngÃ y â€” náº¿u má»—i cá»™t
    một thứ tự thì không đọc được xu hướng.
 
-3. **Ngành không giao dịch trong một phiên vẫn giữ khúc giá trị 0** (fillna(0)),
-   nếu không thứ tự stack lệch giữa các cột.
+3. **NgÃ nh khÃ´ng giao dá»‹ch trong má»™t phiÃªn váº«n giá»¯ khÃºc giÃ¡ trá»‹ 0** (fillna(0)),
+   náº¿u khÃ´ng thá»© tá»± stack lá»‡ch giá»¯a cÃ¡c cá»™t.
 
-Giá trị mỗi phiên = volume × close × 1000 (close đơn vị nghìn đồng → VND), đúng
+GiÃ¡ trá»‹ má»—i phiÃªn = volume Ã— close Ã— 1000 (close Ä‘Æ¡n vá»‹ nghÃ¬n Ä‘á»“ng â†’ VND), Ä‘Ãºng
 công thức flow_surge_service dùng cho phiên nền. Đây là xấp xỉ giá trị khớp lệnh
-— nến ngày không có `accumulated_value` như bảng giá realtime.
+â€” náº¿n ngÃ y khÃ´ng cÃ³ `accumulated_value` nhÆ° báº£ng giÃ¡ realtime.
 """
 
 from app.services import sector_service
@@ -31,6 +31,9 @@ _NGHIN_TO_VND = 1000
 
 
 def _candle_value_vnd(candle) -> float:
+    value = candle.get("value")
+    if value:
+        return float(value)
     volume = candle.get("volume")
     close = candle.get("close")
     if not volume or not close:
@@ -41,8 +44,8 @@ def _candle_value_vnd(candle) -> float:
 def latest_session_times(history_by_symbol, sessions=DEFAULT_SESSIONS) -> list[int]:
     """`sessions` mốc thời gian nến gần nhất có thật trong dữ liệu, xếp tăng dần.
 
-    Gom từ MỌI mã: một mã lẻ có thể thiếu phiên (mới niêm yết, bị đình chỉ), lấy
-    theo một mã thì trục X sẽ thiếu cột.
+    Gom tá»« Má»ŒI mÃ£: má»™t mÃ£ láº» cÃ³ thá»ƒ thiáº¿u phiÃªn (má»›i niÃªm yáº¿t, bá»‹ Ä‘Ã¬nh chá»‰), láº¥y
+    theo má»™t mÃ£ thÃ¬ trá»¥c X sáº½ thiáº¿u cá»™t.
     """
     times = set()
     for candles in (history_by_symbol or {}).values():
@@ -58,10 +61,10 @@ def build_sector_flow(
     industry_map: dict | None = None,
     sessions: int = DEFAULT_SESSIONS,
 ) -> dict:
-    """history_by_symbol: {mã: [nến ngày có time/close/volume]}.
+    """history_by_symbol: {mÃ£: [náº¿n ngÃ y cÃ³ time/close/volume]}.
 
-    Trả {sessions: [time...], industries: [{name, icb_code, values, pcts, total}]}
-    — `values`/`pcts` cùng độ dài với `sessions`, ngành xếp theo `total` giảm dần.
+    Tráº£ {sessions: [time...], industries: [{name, icb_code, values, pcts, total}]}
+    â€” `values`/`pcts` cÃ¹ng Ä‘á»™ dÃ i vá»›i `sessions`, ngÃ nh xáº¿p theo `total` giáº£m dáº§n.
     """
     imap = industry_map or {}
     times = latest_session_times(history_by_symbol, sessions)
@@ -79,7 +82,7 @@ def build_sector_flow(
             group = {
                 "name": info.get("icb_name", UNCLASSIFIED),
                 "icb_code": icb_code,
-                # fillna(0) ngay từ đầu: ngành thiếu phiên vẫn đủ số khúc.
+                # fillna(0) ngay tá»« Ä‘áº§u: ngÃ nh thiáº¿u phiÃªn váº«n Ä‘á»§ sá»‘ khÃºc.
                 "values": [0.0] * len(times),
             }
             groups[key] = group
@@ -110,7 +113,7 @@ def build_sector_flow(
             }
         )
 
-    # Thứ tự cố định cho cả 5 cột và cả 2 chart: theo tổng 5 phiên.
+    # Thá»© tá»± cá»‘ Ä‘á»‹nh cho cáº£ 5 cá»™t vÃ  cáº£ 2 chart: theo tá»•ng 5 phiÃªn.
     industries.sort(key=lambda g: g["total"], reverse=True)
     return {
         "sessions": times,
@@ -126,3 +129,4 @@ def get_sector_flow(sessions: int = DEFAULT_SESSIONS) -> dict:
 
     history = market_cache.get_snapshot("sector_flow_history") or {}
     return build_sector_flow(history, sector_service.get_industry_map(), sessions)
+

@@ -47,6 +47,7 @@ from app.services import vn30_basket_service
 from app.services import foreign_trading_service
 from app.core import vnstock_license
 from app.services import sector_flow_surge_service
+from app.services import sector_flow_consistency_service
 
 
 @asynccontextmanager
@@ -91,6 +92,9 @@ async def lifespan(app: FastAPI):
     # Board toàn TT (flow_surge) — nạp last-good từ đĩa để chart dòng tiền vẫn
     # hiển thị đủ universe khi boot ngoài giờ / sáng hôm sau trước giờ mở.
     market_refresher.load_market_board_full_cache()
+    # Điểm chỉ số của chart "TOÀN CẢNH CHỈ SỐ" — cache RAM mất sau restart, mà
+    # sáng sớm history vendor hay chậm/bị chặn nên cột điểm/% sẽ trắng.
+    index_overview_service.load_points_cache()
     # Nến ngày toàn TT cho hai chart "5 phiên gần nhất" — nạp từ đĩa để khỏi
     # phải quét lại ~1.600 mã (~4 phút) sau mỗi lần restart.
     market_refresher.load_sector_flow_cache()
@@ -199,6 +203,18 @@ def get_sector_flow_surge(
     icb_code (ICB cấp 3), % tính trên tổng value đã cộng dồn cả ngành. Đọc
     board + nến base RAM + bản đồ ngành memoize, không gọi vnstock thêm."""
     return sector_flow_surge_service.get_sector_flow_surge(avg_window)
+
+@app.get("/api/python/sector-flow-consistency")
+def get_sector_flow_consistency(
+    sessions: int = Query(30, ge=5, le=120, description="Số phiên nhìn lại"),
+    avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền so độ mạnh dòng tiền"),
+):
+    """Chart 'NGÀNH HÚT TIỀN ĐỀU ĐẶN NHẤT': lưới nhiệt ngành × phiên. Mỗi mã mỗi
+    phiên được chấm ±100/±50/0 theo chiều giá + độ mạnh dòng tiền, gộp theo ngành
+    bằng trung bình có trọng số VỐN HÓA, xếp hạng theo TB/ĐLC của chuỗi điểm.
+    Đọc nến base RAM + snapshot board + bản đồ ngành memoize, không gọi vnstock."""
+    return sector_flow_consistency_service.get_sector_flow_consistency(sessions, avg_window)
+
 
 @app.get("/api/python/tplus-wave")
 def get_tplus_wave(

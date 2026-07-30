@@ -1,20 +1,25 @@
 """Chart "TOÀN CẢNH CHỈ SỐ" (cột nhóm) — 4 nhóm VN INDEX / HN INDEX / UP INDEX /
-VN30, mỗi nhóm 3 cột: ĐỘ THANH KHOẢN (%), điểm tăng giảm, % tăng giảm.
+VN30, mỗi nhóm 3 cột: GIÁ TRỊ KHỚP LỆNH (nghìn tỷ), điểm tăng giảm, % tăng giảm.
 
 Điểm chỉ số + đóng cửa phiên trước: lấy THẬT từ index history (close nến hôm nay
 và nến áp chót). Giá trị khớp lệnh mỗi sàn: cộng `value` THẬT của cổ phiếu theo
 sàn (từ market_board_full + bản đồ sàn), VN30 cộng theo danh sách thành viên —
 số liệu thật, chỉ gộp, không ước lượng.
 
-ĐỘ THANH KHOẢN = giá trị GD hôm nay / TB các phiên trước × 100. Con số tuyệt đối
-(18 nghìn tỷ) không nói lên cao hay thấp; tỷ lệ so với nền thì có. 100% = đúng
-bằng nền gần đây.
+`thanh_khoan_pct` = giá trị GD hôm nay / TB các phiên trước × 100 (100% = đúng
+bằng nền gần đây) — chart KHÔNG còn vẽ theo tỷ lệ này nữa, nó chỉ còn phục vụ
+cột "% TB N phiên" của bảng bên dưới chart.
 """
 
+import json
+import logging
+import os
 import time
 from datetime import datetime, timedelta
 
 from app.data import data_source
+
+logger = logging.getLogger(__name__)
 
 VN_TZ = data_source.VN_TZ
 
@@ -30,9 +35,19 @@ _ALL_GROUPS = _EXCHANGE_GROUPS + ("VN30",)  # VN30 là tập con của HOSE, kh�
 _NGHIN_TY = 1_000_000_000_000  # 1 nghìn tỷ = 1e12 VND
 _NGHIN_TO_VND = 1000  # nến history theo nghìn đồng, board theo VND thô
 
-# Điểm chỉ số đổi chậm — memoize theo TTL để FE poll không bắt fetch mỗi lần.
-_POINTS_TTL_S = 60
+# Điểm chỉ số: cache RAM + đĩa, do market_refresher._maybe_refresh_index_points
+# làm mới ở luồng nền. KHÔNG có TTL nào ở đây: hết hạn giữa lúc vendor chậm là
+# request phải gánh 4 call history × timeout cứng 30s của vnstock_data (tới ~2
+# phút/request, FE báo lỗi → chart mất). Cache chỉ bị thay khi có bản MỚI.
 _points_cache = {"at": 0.0, "data": {}}
+_RUNTIME_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data",
+)
+INDEX_POINTS_CACHE_FILE = os.environ.get(
+    "INDEX_POINTS_CACHE_FILE",
+    os.path.join(_RUNTIME_DATA_DIR, "index_points_cache.json"),
+)
 
 
 def exchange_values_from_board(board_rows, exchange_map, vn30_members=None):
@@ -190,15 +205,76 @@ def _fetch_index_points(history_fn=None, now=None):
     return out
 
 
-def _index_points_cached(history_fn=None, now=None):
-    """Điểm chỉ số memoize theo TTL (last-good khi fetch mới rỗng)."""
-    now_mono = time.monotonic()
-    if _points_cache["data"] and now_mono - _points_cache["at"] < _POINTS_TTL_S:
-        return _points_cache["data"]
+def _save_points_cache():
+    try:
+        with open(INDEX_POINTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "date": datetime.now(VN_TZ).date().isoformat(),
+                    "points": _points_cache["data"],
+                },
+                f,
+                ensure_ascii=False,
+            )
+    except OSError as e:
+        logger.warning("ghi index_points cache that bai: %s", e)
+
+
+def load_points_cache():
+    """Nạp điểm chỉ số last-good từ đĩa lúc khởi động.
+
+    Đây là snapshot DUY NHẤT của chart này chỉ sống trong RAM — board toàn TT,
+    nến ngày, board VN100, thỏa thuận đều có cache đĩa (xem api.py lifespan).
+    Không nạp lại thì restart qua đêm là cột "điểm tăng giảm"/"% tăng giảm"
+    trắng cho tới khi vendor trả history, mà sáng sớm vendor hay chậm/bị chặn.
+    """
+    try:
+        with open(INDEX_POINTS_CACHE_FILE, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.info("khong nap index_points cache tu dia: %s", e)
+        return None
+    raw = payload.get("points") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    points = {}
+    for symbol, pts in raw.items():
+        if not isinstance(pts, dict) or not isinstance(pts.get("current"), (int, float)):
+            continue
+        prev = pts.get("prev")
+        points[symbol] = {
+            "current": float(pts["current"]),
+            "prev": float(prev) if isinstance(prev, (int, float)) else None,
+        }
+    if not points:
+        return None
+    _points_cache["data"] = points
+    _points_cache["at"] = time.monotonic()
+    return points
+
+
+def refresh_index_points(history_fn=None, now=None):
+    """Làm mới điểm chỉ số vào cache RAM + đĩa. market_refresher gọi ở luồng nền.
+
+    GỘP theo từng index thay vì gán cả dict: một lượt chỉ fetch được VNINDEX
+    (VN30 lỗi/rate-limit) mà gán thẳng là VN30 mất khỏi chart dù vừa có số liệu
+    tốt. Trả True khi có ít nhất một index mới.
+    """
     fetched = _fetch_index_points(history_fn, now)
-    if fetched:
-        _points_cache["data"] = fetched
-        _points_cache["at"] = now_mono
+    if not fetched:
+        return False
+    _points_cache["data"] = {**_points_cache["data"], **fetched}
+    _points_cache["at"] = time.monotonic()
+    _save_points_cache()
+    return True
+
+
+def _index_points_cached(history_fn=None, now=None):
+    """Điểm chỉ số cho request: chỉ ĐỌC cache. Cache trắng hẳn (boot lạnh, chưa
+    có file đĩa, luồng nền chưa chạy lượt đầu) mới tự fetch một lần."""
+    if _points_cache["data"]:
+        return _points_cache["data"]
+    refresh_index_points(history_fn, now)
     return _points_cache["data"]
 
 

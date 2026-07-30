@@ -528,6 +528,10 @@ def _map_board(df) -> list[dict]:
                 "ceiling": _num(row[("listing", "ceiling")]), #Giá trần.
                 "floor": _num(row[("listing", "floor")]),# giá sàn
                 "value": value_millions * 1_000_000,
+                # Số cổ phiếu ĐANG NIÊM YẾT — price_board có sẵn cột này nên vốn
+                # hóa (listed_share × price) không tốn thêm request nào. Dùng cho
+                # trọng số ngành ở sector_flow_consistency_service.
+                "listed_share": _num(row.get(("listing", "listed_share"))),
                 # KL khá»›p tÃ­ch lÅ©y phiÃªn (cá»• phiáº¿u) â€” cho snapshot /quotes.
                 "volume": _num(row[("match", "accumulated_volume")]),
                 # OHLC phiÃªn hÃ´m nay â€” sáºµn trong price_board, dÃ¹ng cho /sectors.
