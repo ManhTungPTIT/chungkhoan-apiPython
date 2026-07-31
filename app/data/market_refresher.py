@@ -310,11 +310,53 @@ def load_sector_flow_cache():
     return history
 
 
+_DAY_S = 86400
+
+
 def _session_epoch(day) -> int:
-    return int(datetime.combine(day, datetime.min.time(), tzinfo=VN_TZ).timestamp())
+    """Mốc thời gian phiên `day` theo convention nến vendor: 00:00 UTC của NGÀY
+    GIAO DỊCH (VCI trả timestamp tz-aware UTC).
+
+    Trước đây hàm này lấy 00:00 GIỜ VN = 17:00 UTC hôm trước, lệch đúng 7 tiếng
+    so với nến history. Hệ quả: cột phiên hiện tại nằm ở mốc riêng nên
+    `sessionLabel` của FE (đọc theo UTC) in ra ngày HÔM QUA — chart hiện 5 cột
+    nhưng hai cột cuối trùng nhãn, trông như thiếu phiên hiện tại.
+    """
+    return int(datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).timestamp())
 
 
-def _today_board_candles(board, today=None) -> dict:
+def _session_date(candle_time):
+    """Ngày giao dịch của một mốc nến. Đọc theo giờ VN nên đúng với CẢ HAI
+    convention (00:00 UTC → 07:00 VN cùng ngày; 00:00 VN → cùng ngày)."""
+    try:
+        return datetime.fromtimestamp(int(candle_time), VN_TZ).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _aligned_session_epoch(history, day) -> int:
+    """Mốc cho phiên `day` CĂN theo chính các nến đang có trong history.
+
+    Lấy phiên đã đóng gần nhất rồi cộng số ngày chênh lệch: khoảng cách giữa các
+    mốc nến luôn là bội số nguyên của 86400 dù vendor dùng convention nào, nên
+    cách này tự khớp và không phải đoán múi giờ của vendor. History rỗng (hoặc
+    chỉ có nến hôm nay từ lần merge trước) → rơi về `_session_epoch`.
+    """
+    last = 0
+    for rows in (history or {}).values():
+        for candle in rows or []:
+            time_value = int(candle.get("time") or 0)
+            if time_value > last and (_session_date(time_value) or day) < day:
+                last = time_value
+    if last <= 0:
+        return _session_epoch(day)
+    last_date = _session_date(last)
+    if last_date is None:
+        return _session_epoch(day)
+    return last + _DAY_S * (day - last_date).days
+
+
+def _today_board_candles(board, today=None, session_time=None) -> dict:
     """Nến phiên hiện tại dựng từ price_board realtime cho sector-flow.
 
     History daily của vendor thường cập nhật muộn hơn board trong phiên. Board đã có
@@ -324,7 +366,7 @@ def _today_board_candles(board, today=None) -> dict:
     if not board or not _board_has_trades(board):
         return {}
     today = today or datetime.now(VN_TZ).date()
-    session_time = _session_epoch(today)
+    session_time = _session_epoch(today) if session_time is None else session_time
     candles = {}
     for row in board or []:
         symbol = row.get("symbol")
@@ -347,18 +389,23 @@ def _merge_board_session_into_sector_flow_history(board=None, today=None) -> boo
     history = market_cache.get_snapshot("sector_flow_history") or {}
     if not history:
         return False
+    today = today or datetime.now(VN_TZ).date()
+    session_time = _aligned_session_epoch(history, today)
     candles = _today_board_candles(
         board if board is not None else market_cache.get_snapshot("market_board_full"),
         today=today,
+        session_time=session_time,
     )
     if not candles:
         return False
 
-    session_time = _session_epoch(today or datetime.now(VN_TZ).date())
     merged = dict(history)
     for symbol, candle in candles.items():
         rows = list(merged.get(symbol) or [])
-        rows = [r for r in rows if int(r.get("time") or 0) != session_time]
+        # Bỏ theo NGÀY chứ không theo mốc: cache cũ (hoặc nến vendor về muộn
+        # trong ngày) có thể mang mốc khác cho cùng phiên hôm nay — lọc theo mốc
+        # sẽ để lại hai cột cùng một ngày.
+        rows = [r for r in rows if _session_date(r.get("time")) != today]
         rows.append(candle)
         rows.sort(key=lambda r: int(r.get("time") or 0))
         merged[symbol] = rows

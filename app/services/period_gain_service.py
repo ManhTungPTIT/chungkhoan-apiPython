@@ -1,8 +1,9 @@
-"""Chart "TOP TĂNG MẠNH NHẤT TUẦN" (và biến thể THÁNG) — toàn rổ sắp theo % tăng
-trong kỳ.
+"""Chart "TOP TĂNG MẠNH NHẤT TUẦN" (và biến thể THÁNG) — toàn rổ xếp theo ĐIỂM
+(tăng giá có trọng số thanh khoản), CÙNG công thức xếp hạng với top_gain_service.
 
-Khác top_gain_service (mốc so sánh là TRUNG BÌNH N phiên): ở đây mốc là close
-phiên ĐẦU của một DẢI phiên, cột value cộng dồn cả dải.
+Khác top_gain_service ở MỐC so sánh: ở đây mốc là close phiên ĐẦU của một DẢI
+phiên (week: phiên cũ nhất trong 5 phiên đã đóng — đúng nghĩa "close T-5"), còn
+top_gain_service lùi hẳn (N+1) phiên.
 
 Kỳ `week` (2026-07-27 đổi): **5 phiên ĐÃ ĐÓNG gần nhất, KHÔNG tính phiên hôm
 nay**. Trước đây là "từ thứ Hai tuần này" — cách đó làm chart TRỐNG nguyên ngày
@@ -10,19 +11,34 @@ thứ Hai (đầu kỳ trùng hôm nay mà hôm nay lại bị loại) và cho k
 thường theo thứ trong tuần.
 
 Kỳ `month` giữ nguyên cách tính theo lịch (từ mùng 1 tới phiên đã đóng gần nhất).
-Endpoint vẫn nhận nhưng hiện chưa có chart nào dùng.
+Endpoint vẫn nhận nhưng hiện chưa có chart nào dùng — nó ăn theo cùng công thức
+điểm, chỉ khác cửa sổ.
 
 Đọc cùng cache RAM (rổ view vn100 + `_history_candles`), không gọi vnstock theo
 request. Nến history là nến NGÀY có volume (xem `signal_service._to_candles`).
 
+Hai bộ lọc của chart (2026-07-31, cùng bộ với top_gain_service):
+  - thanh khoản HÔM NAY > 1 tỷ — chặn phần carry-over chưa khớp đủ 1 tỷ hôm nay;
+  - giá tăng (pct_tang > 0). Cùng nhau chúng đảm bảo diem luôn dương, không có
+    nghịch lý "giảm sâu + thanh khoản lớn = điểm cao".
+
 Mỗi mã:
-  - gia_tri_khop_lenh (Tỷ): SUM value các phiên TRONG cửa sổ, lấy từ history
-    (`volume × close × 1000`, close nghìn đồng → VND). Không cộng phiên hôm nay.
+  - gia_tri_khop_lenh (Tỷ): value khớp lệnh HÔM NAY (tại thời điểm trong phiên),
+    lấy live từ board. 2026-07-31 đổi: trước đây là SUM value 5 phiên trong cửa
+    sổ lấy từ history. Điểm nhân với thanh khoản HIỆN TẠI, nên cột hiển thị phải
+    là chính con số đó — giữ số cộng dồn thì chart không giải thích nổi thứ hạng
+    của chính nó (bar ngắn lại xếp trên bar dài).
   - gia_hien_tai (Nghìn): giá live board / PRICE_BOARD_SCALE (fallback close
     phiên cuối cửa sổ).
   - pct_tang (%): (giá hiện tại − close phiên ĐẦU cửa sổ) / close đó × 100.
+  - diem: pct_tang × log10(thanh khoản Tỷ + 1) — số dùng để XẾP HẠNG.
+
+Hệ số log10 tính theo TỶ đồng chứ không phải VND; lý do ghi trong docstring
+top_gain_service (theo VND mọi mã rơi vào 9…12, xếp hạng thoái hoá về đúng thứ
+tự % tăng).
 """
 
+import math
 from datetime import date, datetime, timedelta
 
 from app.services import signal_service, top_gain_service
@@ -31,7 +47,6 @@ DEFAULT_TOP_N = 30
 # Số phiên đã đóng của kỳ "week" — 1 tuần giao dịch.
 RECENT_SESSIONS = 5
 
-_NGHIN_TO_VND = 1000
 _VND_TO_TY = 1_000_000_000
 
 
@@ -97,6 +112,12 @@ def compute_period_gain(
     window_start = None
     for row in board_rows or []:
         symbol = row.get("symbol")
+        # Thanh khoản HIỆN TẠI (trong phiên) — vừa là bộ lọc, vừa là hệ số của
+        # diem. Lọc trước khi đụng tới history: rẻ hơn và loại luôn phần
+        # carry-over của rổ vn100 chưa khớp đủ 1 tỷ hôm nay.
+        value_vnd = row.get("value") or 0
+        if value_vnd <= top_gain_service.MIN_VALUE_VND:
+            continue
         candles = (history_candles or {}).get(symbol)
         if not candles:
             continue
@@ -112,17 +133,11 @@ def compute_period_gain(
         if not gia_hien_tai or gia_hien_tai <= 0:
             continue
         pct = round((gia_hien_tai - base_close) / base_close * 100, 2)
-
-        # Value CHỈ của các phiên trong cửa sổ — phiên hôm nay không tính.
-        closed_vnd = 0
-        for candle in window:
-            volume = candle.get("volume")
-            close = candle.get("close")
-            if volume and close:
-                closed_vnd += volume * close * _NGHIN_TO_VND
-        gia_tri_ty = round(closed_vnd / _VND_TO_TY, 3)
-        if gia_tri_ty <= 0:
+        if pct <= 0:            # chỉ giữ mã tăng giá
             continue
+
+        gia_tri_ty = value_vnd / _VND_TO_TY
+        diem = pct * math.log10(gia_tri_ty + 1)
 
         if window_start is None:
             try:
@@ -133,13 +148,14 @@ def compute_period_gain(
         rows.append(
             {
                 "symbol": symbol,
-                "gia_tri_khop_lenh": gia_tri_ty,
+                "gia_tri_khop_lenh": round(gia_tri_ty, 3),
                 "gia_hien_tai": round(gia_hien_tai, 2),
                 "pct_tang": pct,
+                "diem": round(diem, 2),
             }
         )
 
-    rows.sort(key=lambda r: r["pct_tang"], reverse=True)
+    rows.sort(key=lambda r: r["diem"], reverse=True)
     return {
         "rows": rows[:top_n],
         "start": start_iso if period == "month" else window_start,

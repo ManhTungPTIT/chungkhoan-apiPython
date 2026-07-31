@@ -200,7 +200,9 @@ def get_sector_flow_surge(
     avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
 ):
     """Chart 'NGÀNH CÓ DÒNG TIỀN TĂNG ĐỘT BIẾN': gộp flow-surge từng mã theo
-    icb_code (ICB cấp 3), % tính trên tổng value đã cộng dồn cả ngành. Đọc
+    icb_code (ICB cấp 3), % đột biến tính trên tổng value cả ngành so với TB N
+    phiên × tỉ lệ khung giờ (cùng BASELINE_CURVE với chart từng mã). Xếp theo
+    diem = % đột biến × log10(thanh khoản ngành Tỷ + 1) × tỷ lệ mã tăng. Đọc
     board + nến base RAM + bản đồ ngành memoize, không gọi vnstock thêm."""
     return sector_flow_surge_service.get_sector_flow_surge(avg_window)
 
@@ -222,10 +224,10 @@ def get_tplus_wave(
         "2,3,5", description="Các cửa sổ T+ muốn xem, cách nhau dấu phẩy (vd 2,4,7)"
     ),
 ):
-    """Radar 'Các mã đang có sóng tăng T+': mỗi cửa sổ T+ một vùng, top mã tăng
-    mạnh nhất so với trung bình N phiên — CÙNG định nghĩa với chart
-    /top-gain-tplus. Đọc rổ vn100 + nến base đã nạp trong RAM (không gọi vnstock
-    theo request)."""
+    """Radar 'Các mã đang có sóng tăng T+': mỗi cửa sổ T+ một vùng, top mã mạnh
+    nhất so với close phiên đã đóng lùi N+1 — CÙNG định nghĩa (và cùng thứ hạng
+    theo diem) với chart /top-gain-tplus. Đọc rổ vn100 + nến base đã nạp trong
+    RAM (không gọi vnstock theo request)."""
     return tplus_wave_service.get_tplus_wave(
         windows=tplus_wave_service.parse_windows(windows)
     )
@@ -234,12 +236,12 @@ def get_tplus_wave(
 @app.get("/api/python/top-gain-tplus")
 def get_top_gain_tplus(
     top_n: int = Query(20, ge=1, le=100, description="Số mã tối đa trả về"),
-    window: int = Query(2, ge=2, le=5, description="Chart T+N: mốc so sánh = trung bình N giá (N−1 close gần nhất + giá hiện tại)"),
+    window: int = Query(2, ge=2, le=5, description="Chart T+N: mốc so sánh = close phiên đã đóng lùi N+1"),
 ):
-    """Chart 'NHÓM TĂNG MẠNH NHẤT (NGẮN HẠN: T+N)': cả rổ vn100 (đã lọc value > 1
-    tỷ), tăng giá cao nhất so với trung bình N giá — gồm close của (N−1) phiên đã
-    đóng gần nhất và giá hiện tại — 3 số/mã (giá trị khớp lệnh hôm nay, giá hiện
-    tại, % tăng).
+    """Chart 'NHÓM TĂNG MẠNH NHẤT (NGẮN HẠN: T+N)': rổ vn100 lọc value hôm nay > 1
+    tỷ và chỉ giữ mã tăng giá, xếp theo diem = % tăng × log10(thanh khoản Tỷ + 1)
+    — 4 số/mã (giá trị khớp lệnh hôm nay, giá hiện tại, % tăng so close phiên đã
+    đóng lùi N+1, diem).
     Đọc snapshot view vn100 + nến base RAM, không gọi vnstock."""
     return top_gain_service.get_top_gain(top_n, window=window)
 
@@ -249,9 +251,10 @@ def get_top_gain_period(
     period: str = Query("week", pattern="^(week|month)$", description="Kỳ: week / month"),
     top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
 ):
-    """Chart 'TOP TĂNG MẠNH NHẤT TUẦN/THÁNG': cả rổ vn100 sắp theo % tăng trong kỳ
-    (so giá hiện tại với close phiên ĐẦU cửa sổ) — 3 số/mã (value cộng dồn trong
-    cửa sổ, giá hiện tại, % tăng).
+    """Chart 'TOP TĂNG MẠNH NHẤT TUẦN/THÁNG': rổ vn100 lọc thanh khoản hôm nay > 1
+    tỷ và chỉ giữ mã tăng giá, xếp theo diem = % tăng × log10(thanh khoản Tỷ + 1)
+    — 4 số/mã (thanh khoản HÔM NAY, giá hiện tại, % tăng so close phiên ĐẦU cửa
+    sổ, diem).
     week = 5 phiên ĐÃ ĐÓNG gần nhất, không tính phiên hôm nay; month = theo lịch
     (mùng 1 → phiên đã đóng gần nhất). Đọc rổ vn100 + nến base RAM, không gọi
     vnstock."""
@@ -263,11 +266,13 @@ def get_flow_surge(
     top_n: int = Query(30, ge=1, le=100, description="Số mã tối đa trả về"),
     avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
 ):
-    """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN HÔM NAY': toàn board sắp theo % tăng dòng
-    tiền = (value hôm nay − nền) / nền × 100, với nền = trung bình value N phiên
-    × tỉ lệ theo KHUNG GIỜ (20% trước 10:00 / 45% tới 13:00 / 70% tới 14:00 /
-    100% từ 14:00) để tiền mới chạy nửa phiên không bị so với trọn phiên. Cột tím
-    là value riêng hôm nay. Đọc snapshot board + nến base RAM, không gọi vnstock."""
+    """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN HÔM NAY': toàn board xếp theo diem =
+    (value hôm nay / nền) × log10(value Tỷ + 1), với nền = trung bình value N
+    phiên × tỉ lệ theo KHUNG GIỜ (10% từ 09:30 / 20% 10:00 / 30% 10:30 / 40%
+    11:00 / 50% 11:30 / 65% 13:30 / 75% 14:00 / 90% 14:30 / 100% từ 15:00) để
+    tiền mới chạy nửa phiên không bị so với trọn phiên. Cột xanh là chính tỷ số
+    đó viết dạng % ((ratio − 1) × 100), cột tím là value riêng hôm nay. Đọc
+    snapshot board + nến base RAM, không gọi vnstock."""
     return flow_surge_service.get_flow_surge(top_n, avg_window)
 
 
@@ -277,8 +282,10 @@ def get_flow_surge_month(
     avg_window: int = Query(20, ge=2, le=60, description="Số phiên nền tính trung bình"),
 ):
     """Chart 'DÒNG TIỀN TĂNG ĐỘT BIẾN SO VỚI BÌNH QUÂN 1 THÁNG': như flow-surge
-    nhưng chặt hơn — chỉ giữ mã tiền hôm nay ≥ 5 tỷ và có đủ ≥ 20 phiên nền, xếp
-    theo % tăng so với TB 20 phiên. Đọc snapshot board + nến base RAM."""
+    nhưng chặt hơn — chỉ giữ mã tiền hôm nay ≥ 5 tỷ và có đủ ≥ 20 phiên nền (20
+    phiên ≈ 1 tháng giao dịch). Xếp theo diem = % đột biến × log10(value Tỷ + 1)
+    × (1 + % tăng giá / 100); % đột biến so với TB 20 phiên đã scale theo khung
+    giờ, dùng chung bảng của flow-surge. Đọc snapshot board + nến base RAM."""
     return flow_surge_month_service.get_flow_surge_month(top_n, avg_window)
 
 

@@ -4,16 +4,18 @@ Dùng CHUNG một định nghĩa với hai chart "NHÓM TĂNG MẠNH NHẤT (NG�
 service này chỉ gọi lại `top_gain_service.compute_top_gain` cho từng cửa sổ rồi
 xếp kết quả thành các VÙNG của radar. Nhờ vậy vùng T+2 / T+3 của radar luôn là
 top của đúng bảng xếp hạng mà hai chart kia hiển thị, T+5 chạy cùng công thức
-chỉ khác độ dài cửa sổ trung bình.
+chỉ khác độ sâu nến mốc.
 
 Nhắc lại định nghĩa (chi tiết ở top_gain_service):
-  - Rổ mã = nguyên rổ view vn100 (đã lọc value > 1 tỷ + carry-over).
-  - t{N} = (giá hiện tại − base) / base × 100, base = trung bình N giá gồm close
-    của (N − 1) phiên ĐÃ ĐÓNG gần nhất và giá hiện tại.
+  - Rổ mã = rổ view vn100, lọc thêm value hôm nay > 1 tỷ và chỉ giữ mã tăng giá.
+  - t{N} = (giá hiện tại − close mốc) / close mốc × 100, mốc = phiên ĐÃ ĐÓNG lùi
+    (N + 1).
+  - Thứ hạng theo diem = t{N} × log10(thanh khoản Tỷ + 1), còn số VẼ trên radar
+    vẫn là t{N} (%).
 
 Vì tính theo %, đơn vị giá của nến (nghìn đồng) không ảnh hưởng.
-Mỗi vùng lấy top `zone_n` mã sort theo CHÍNH cửa sổ đó, chỉ giữ mức tăng > 0 —
-một mã có thể xuất hiện ở nhiều vùng.
+Mỗi vùng lấy top `zone_n` mã theo CHÍNH cửa sổ đó — một mã có thể xuất hiện ở
+nhiều vùng.
 """
 
 from app.services import signal_service, top_gain_service
@@ -91,10 +93,11 @@ def compute_tplus_wave(
 
     # Vùng theo từng cửa sổ: lấy trên xếp hạng ĐẦY ĐỦ (không phải top đã cắt
     # theo cửa sổ dài nhất) để mã mạnh riêng ở cửa sổ ngắn không bị sót.
+    # `compute_top_gain` đã bỏ mã không tăng giá nên không cần lọc lại > 0.
     zones = {}
     for n in windows:
         key = f"t{n}"
-        gainers = [r for r in ranked[n] if r["pct_tang"] > 0][:zone_n]
+        gainers = ranked[n][:zone_n]
         zones[key] = {
             "symbols": [r["symbol"] for r in gainers],
             "values": [r["pct_tang"] for r in gainers],

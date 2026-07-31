@@ -2,13 +2,27 @@
 VN30, mỗi nhóm 3 cột: GIÁ TRỊ KHỚP LỆNH (nghìn tỷ), điểm tăng giảm, % tăng giảm.
 
 Điểm chỉ số + đóng cửa phiên trước: lấy THẬT từ index history (close nến hôm nay
-và nến áp chót). Giá trị khớp lệnh mỗi sàn: cộng `value` THẬT của cổ phiếu theo
-sàn (từ market_board_full + bản đồ sàn), VN30 cộng theo danh sách thành viên —
-số liệu thật, chỉ gộp, không ước lượng.
+và nến áp chót).
+
+Giá trị khớp lệnh mỗi sàn (2026-07-31 đổi): thanh khoản của TỪNG MÃ tính bằng
+`giá × khối lượng` rồi cộng theo sàn (từ market_board_full + bản đồ sàn), VN30
+cộng theo danh sách thành viên. Trước đó cột này cộng `value` (`accumulated_value`
+của vendor).
+
+Đánh đổi đã biết của phép đổi: `accumulated_value` là số THẬT, tính theo giá bình
+quân của từng lệnh khớp trong phiên; còn `giá × khối lượng` coi như toàn bộ khối
+lượng khớp ở giá HIỆN TẠI, nên là ƯỚC LƯỢNG — lệch lên khi giá cuối phiên cao hơn
+giá bình quân và ngược lại. Đổi lại, cả hai cột của chart giờ dùng CHUNG một công
+thức với nền lịch sử (`close × volume`), và mã nào vendor bỏ trống
+`accumulated_value` vẫn có thanh khoản thay vì rơi về 0.
 
 `thanh_khoan_pct` = giá trị GD hôm nay / TB các phiên trước × 100 (100% = đúng
 bằng nền gần đây) — chart KHÔNG còn vẽ theo tỷ lệ này nữa, nó chỉ còn phục vụ
 cột "% TB N phiên" của bảng bên dưới chart.
+
+Hai cột dùng chung `exchange_today_values` nhưng KHÁC rổ mã: cột hiển thị cộng
+TOÀN board (là con số tuyệt đối của cả sàn), còn tử số của tỷ lệ giới hạn theo
+`universe` cho khớp mẫu số. Xem docstring hàm đó.
 """
 
 import json
@@ -50,21 +64,6 @@ INDEX_POINTS_CACHE_FILE = os.environ.get(
 )
 
 
-def exchange_values_from_board(board_rows, exchange_map, vn30_members=None):
-    """Tổng value (VND) theo sàn (chuẩn hoá HSX→HOSE) + VN30 theo member list."""
-    totals = dict.fromkeys(_ALL_GROUPS, 0)
-    vn30 = set(vn30_members or [])
-    for row in board_rows or []:
-        symbol = row.get("symbol")
-        value = row.get("value") or 0
-        exch = data_source._normalize_exchange(exchange_map.get(symbol) if exchange_map else None)
-        if exch in totals:
-            totals[exch] += value
-        if symbol in vn30:
-            totals["VN30"] += value
-    return totals
-
-
 def exchange_avg_values(history, exchange_map, vn30_members=None, today=None):
     """Giá trị GD trung bình mỗi nhóm qua các phiên ĐÃ ĐÓNG trong `history`.
 
@@ -72,7 +71,7 @@ def exchange_avg_values(history, exchange_map, vn30_members=None, today=None):
     Trả (avgs {group: vnd}, so_phien). ({}, 0) nếu không có phiên nào đã đóng.
 
     Nến history theo NGHÌN đồng (xem signal_service.PRICE_BOARD_SCALE) nên phải
-    nhân _NGHIN_TO_VND — cùng cách period_gain_service/flow_surge_service quy đổi.
+    nhân _NGHIN_TO_VND — cùng cách flow_surge_service/sector_flow_service quy đổi.
     Phiên hôm nay bị loại: nó đang chạy dở, gộp vào nền sẽ tự kéo mẫu số về phía
     tử số và làm tỷ lệ luôn xấp xỉ 100%.
     """
@@ -108,12 +107,19 @@ def exchange_avg_values(history, exchange_map, vn30_members=None, today=None):
 
 
 def exchange_today_values(board_rows, exchange_map, vn30_members=None, universe=None):
-    """Tổng `price × volume` (VND) hôm nay mỗi nhóm — mẫu số của tỷ lệ thanh khoản.
+    """Thanh khoản hôm nay mỗi nhóm = tổng `giá × khối lượng` (VND) của từng mã,
+    cộng theo sàn (chuẩn hoá HSX→HOSE) + VN30 theo member list.
 
-    KHÔNG dùng `value` (accumulated_value) dù nó chính xác hơn: mẫu số chỉ tính
-    được bằng close × volume, trộn hai công thức làm tỷ lệ lệch hệ thống.
-    `universe` (khóa của sector_flow_history) giới hạn rổ mã cho khớp mẫu số —
-    board có cả chứng quyền/trái phiếu mà history thì không.
+    Phục vụ CẢ HAI cột của chart, khác nhau ở `universe`:
+      - `universe=None` → cộng TOÀN board: cột `gia_tri_khop_lenh` hiển thị, là
+        con số tuyệt đối của cả sàn nên không được cắt bớt mã nào.
+      - `universe=set(history)` → tử số của `thanh_khoan_pct`, giới hạn đúng rổ
+        mã của mẫu số (board có cả chứng quyền/trái phiếu mà history thì không;
+        tử rộng hơn mẫu sẽ làm tỷ lệ phồng lên).
+
+    KHÔNG dùng `value` (accumulated_value) dù nó là số thật: nền lịch sử chỉ tính
+    được bằng `close × volume`, trộn hai công thức làm tỷ lệ lệch hệ thống — giá
+    đóng cửa khác giá bình quân phiên.
     """
     totals = dict.fromkeys(_ALL_GROUPS, 0)
     vn30 = set(vn30_members or [])
@@ -287,12 +293,14 @@ def get_index_overview():
     board_rows = market_cache.get_snapshot("market_board_full") or []
     exchange_map = data_source._symbol_exchange_map()
     vn30_members = vn100_service.get_vn30_members()
-    exchange_values = exchange_values_from_board(board_rows, exchange_map, vn30_members)
+    # Cột hiển thị: Σ(giá × khối lượng) trên TOÀN board, không giới hạn rổ.
+    exchange_values = exchange_today_values(board_rows, exchange_map, vn30_members)
 
     # Nền lịch sử dùng CHUNG snapshot với hai chart "5 phiên gần nhất" — không
     # phát sinh request nào, và sáng sớm nó đã được nạp từ đĩa (api.py:96).
     history = market_cache.get_snapshot("sector_flow_history") or {}
     avg_values, so_phien_tb = exchange_avg_values(history, exchange_map, vn30_members)
+    # Tử số của tỷ lệ: CÙNG công thức nhưng cắt về đúng rổ mã của mẫu số.
     today_values = exchange_today_values(
         board_rows, exchange_map, vn30_members, universe=set(history)
     )

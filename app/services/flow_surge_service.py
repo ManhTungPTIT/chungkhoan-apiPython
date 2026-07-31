@@ -1,9 +1,18 @@
 """Chart "DÒNG TIỀN TĂNG ĐỘT BIẾN NỔI BẬT HÔM NAY" — đo mức đột biến thanh khoản
 trong 1 phiên (KHÔNG phải biến động giá).
 
-Khác biệt cốt lõi: cột xanh = % tăng DÒNG TIỀN = (value hôm nay − NỀN) / NỀN × 100
-→ mã hôm nay giao dịch gấp nhiều lần bình thường thì % này bắn rất cao. Cột tím =
-value RIÊNG hôm nay (không cộng dồn).
+Xếp hạng theo ĐIỂM:
+
+    diem = (thanh khoản hiện tại / NỀN cùng thời điểm) × log10(thanh khoản Tỷ + 1)
+
+Thừa số đầu là mức đột biến, thừa số sau là trọng số quy mô — cùng khuôn với
+top_gain_service/period_gain_service, và log10 cũng tính theo TỶ đồng chứ không
+phải VND (theo VND mọi mã rơi vào 9…12, trọng số gần như triệt tiêu).
+
+Hai cột hiển thị CHÍNH LÀ hai thừa số đó, nên chart tự giải thích được thứ hạng:
+  - cột xanh = % tăng DÒNG TIỀN = (value hôm nay − NỀN) / NỀN × 100, tức thừa số
+    đầu viết dưới dạng phần trăm ((ratio − 1) × 100);
+  - cột tím = value RIÊNG hôm nay (không cộng dồn), đúng con số nằm trong log10.
 
 NỀN = TB value N phiên gần nhất × tỉ lệ theo KHUNG GIỜ (xem `BASELINE_CURVE`).
 
@@ -12,6 +21,7 @@ value phiên nền = volume × close × 1000 (close nghìn đồng → VND); val
 trực tiếp từ board (VND).
 """
 
+import math
 from datetime import datetime, time
 
 from app.services import signal_service
@@ -22,19 +32,27 @@ DEFAULT_AVG_WINDOW = 20  # số phiên nền để tính trung bình (spec: ví 
 # Nền so sánh theo KHUNG GIỜ. TB20 là dòng tiền TRỌN phiên, còn value hôm nay mới
 # tích luỹ được một phần → so thẳng thì 9h30 mã nào cũng âm sâu, 14h30 lại dương
 # ảo. Mỗi khung giờ chỉ so với phần TB20 mà một phiên bình thường đã khớp được
-# tới thời điểm đó:
-#   09:00–10:00 → 20% TB20 | 10:00–11:30 → 45% | 13:00–14:00 → 70% | 14:00–15:00 → 100%
-# Mốc trong bảng là ĐẦU khung và có hiệu lực tới mốc kế tiếp, nên 3 quãng bảng
-# không liệt kê được phủ luôn:
-#   - trước 09:00 (gồm ATO) giữ 20% → mẫu số không bao giờ bằng 0;
-#   - nghỉ trưa 11:30–13:00 giữ 45% vì tiền đứng yên từ 11:30, đổi nền sẽ làm %
-#     nhảy dù không có lệnh nào khớp;
+# tới thời điểm đó. Bảng giả định (2026-07-31, thay bảng 4 khung cũ):
+#   09:30 → 10% | 10:00 → 20% | 10:30 → 30% | 11:00 → 40% | 11:30 → 50%
+#   13:30 → 65% | 14:00 → 75% | 14:30 → 90% | 15:00 → 100%
+# Mốc là ĐẦU khung, giữ nguyên tỉ lệ tới mốc kế tiếp (bậc thang, không nội suy) —
+# giữ đúng convention cũ. Nhờ vậy 3 quãng bảng không liệt kê được phủ luôn:
+#   - trước 09:30 (gồm ATO) giữ 10% → mẫu số không bao giờ bằng 0;
+#   - nghỉ trưa 11:30–13:00 giữ 50% vì tiền đứng yên từ 11:30, đổi nền sẽ làm %
+#     nhảy dù không có lệnh nào khớp. Bảng nhảy thẳng 11:30 → 13:30 nên nửa tiếng
+#     đầu phiên chiều cũng so với 50%;
 #   - sau 15:00 giữ 100% — phiên đã đóng, so trọn phiên mới đúng.
 BASELINE_CURVE = (
-    (time(0, 0), "09:00–10:00", 0.20),
-    (time(10, 0), "10:00–11:30", 0.45),
-    (time(13, 0), "13:00–14:00", 0.70),
-    (time(14, 0), "14:00–15:00", 1.00),
+    (time(0, 0), "trước 09:30", 0.10),
+    (time(9, 30), "09:30–10:00", 0.10),
+    (time(10, 0), "10:00–10:30", 0.20),
+    (time(10, 30), "10:30–11:00", 0.30),
+    (time(11, 0), "11:00–11:30", 0.40),
+    (time(11, 30), "11:30–13:30", 0.50),
+    (time(13, 30), "13:30–14:00", 0.65),
+    (time(14, 0), "14:00–14:30", 0.75),
+    (time(14, 30), "14:30–15:00", 0.90),
+    (time(15, 0), "từ 15:00", 1.00),
 )
 
 
@@ -121,18 +139,22 @@ def compute_flow_surge(
         today_vnd = row.get("value") or 0
         if today_vnd <= 0:
             continue
-        pct = round((today_vnd - base_vnd) / base_vnd * 100, 2)
+        ratio = today_vnd / base_vnd          # mức đột biến so với nền cùng giờ
+        pct = round((ratio - 1) * 100, 2)     # cùng tỷ số, viết dạng %
+        gia_tri_ty = today_vnd / _VND_TO_TY
+        diem = ratio * math.log10(gia_tri_ty + 1)
 
         rows.append(
             {
                 "symbol": symbol,
-                "gia_tri_khop_lenh": round(today_vnd / _VND_TO_TY, 3),  # RIÊNG hôm nay
+                "gia_tri_khop_lenh": round(gia_tri_ty, 3),  # RIÊNG hôm nay
                 "gia_hien_tai": round(gia_hien_tai, 2),
                 "pct_tang": pct,
+                "diem": round(diem, 2),
             }
         )
 
-    rows.sort(key=lambda r: r["pct_tang"], reverse=True)
+    rows.sort(key=lambda r: r["diem"], reverse=True)
     return {
         "rows": rows[:top_n],
         "avg_window": avg_window,

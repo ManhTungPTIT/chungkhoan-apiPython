@@ -1,21 +1,40 @@
 """Chart "DÒNG TIỀN TĂNG ĐỘT BIẾN SO VỚI BÌNH QUÂN 1 THÁNG".
 
-Biến thể CHẶT hơn của flow_surge (chart "hôm nay"): cùng công thức
-  % = (value hôm nay − TB value 20 phiên nền) / TB × 100
-nhưng thêm 2 bộ lọc theo spec để bảng xếp hạng "sạch" hơn:
+20 phiên nền ≈ 1 tháng: tháng dương lịch tính cả cuối tuần và lễ thì chỉ còn
+khoảng 20 phiên giao dịch.
+
+Xếp hạng theo ĐIỂM:
+
+    diem = % đột biến thanh khoản × log10(thanh khoản Tỷ + 1) × (1 + % tăng giá)
+
+  - % đột biến = (value hôm nay − NỀN cùng khung giờ) / NỀN × 100 (cột xanh);
+  - log10 theo TỶ đồng, không phải VND — cùng khuôn ba chart điểm còn lại;
+  - `% tăng giá` vào dưới dạng THẬP PHÂN: mã +7% → nhân 1,07 (chốt với người dùng
+    31/07). Biên độ trần/sàn ±7…15% nên hệ số nằm trong 0,85–1,15 — giá chỉ
+    nghiêng nhẹ thứ hạng, dòng tiền vẫn quyết định, đúng tên chart. Đưa vào dạng
+    số phần trăm (1 + 7 = 8) thì giá áp đảo và mã giảm quá 1% cho hệ số ÂM, khiến
+    đột biến càng mạnh càng tụt sâu.
+
+NỀN dùng chung `flow_surge_service.baseline_bucket` — TB20 là dòng tiền TRỌN
+phiên, còn value hôm nay mới tích luỹ một phần, so thẳng thì sáng sớm mã nào cũng
+âm sâu. (31/07 bổ sung; trước đó chart này so thẳng với TB20 trọn phiên.)
+
+Biến thể CHẶT hơn của flow_surge (chart "hôm nay") ở 2 bộ lọc thêm theo spec:
   - session_count >= 20  → loại mã mới niêm yết / mới giao dịch lại (chưa đủ nền).
   - match_value_T >= 5e9 → loại mã đột biến % cao nhưng tiền tuyệt đối bé.
 Giữ nguyên: nền >= 1 tỷ, giá >= 5.000đ.
 
-Tách RIÊNG khỏi flow_surge_service để KHÔNG đụng chart "hôm nay". Cùng nguồn cache
-RAM (market_board_full + _history_candles), không gọi vnstock. value phiên nền =
-volume × close × 1000 (close nghìn đồng → VND, đúng nghĩa khớp lệnh, không gồm
-thỏa thuận); value hôm nay lấy trực tiếp từ board (VND).
+Tách RIÊNG khỏi flow_surge_service để KHÔNG đụng chart "hôm nay" — chỉ mượn lại
+bảng khung giờ. Cùng nguồn cache RAM (market_board_full + _history_candles),
+không gọi vnstock. value phiên nền = volume × close × 1000 (close nghìn đồng →
+VND, đúng nghĩa khớp lệnh, không gồm thỏa thuận); value hôm nay và `change_pct`
+lấy trực tiếp từ board.
 """
 
+import math
 from datetime import datetime
 
-from app.services import signal_service
+from app.services import flow_surge_service, signal_service
 
 DEFAULT_TOP_N = 20
 DEFAULT_AVG_WINDOW = 20  # số phiên nền tính trung bình (≈ 1 tháng giao dịch)
@@ -56,11 +75,13 @@ def compute_flow_surge_month(
     min_today_vnd=MIN_TODAY_VND,
     min_price_vnd=MIN_PRICE_VND,
 ):
-    """Hàm thuần: board_rows (symbol/price/value hôm nay) + history_candles
-    ({mã: [nến ngày có volume]}) → {rows, avg_window}. Các ngưỡng là tham số để
+    """Hàm thuần: board_rows (symbol/price/value/change_pct hôm nay) +
+    history_candles ({mã: [nến ngày có volume]}) →
+    {rows, avg_window, time_bucket, baseline_factor}. Các ngưỡng là tham số để
     test toán học cô lập được từng bộ lọc."""
     now = now or datetime.now(signal_service.VN_TZ)
     scale = signal_service.PRICE_BOARD_SCALE
+    time_bucket, factor = flow_surge_service.baseline_bucket(now)
 
     rows = []
     for row in board_rows or []:
@@ -74,9 +95,12 @@ def compute_flow_surge_month(
         # Đủ phiên nền — loại mã mới niêm yết / mới giao dịch lại.
         if session_count < min_sessions:
             continue
-        # Nền thanh khoản — loại penny có TB dòng tiền quá nhỏ (% bắn ảo).
+        # Nền thanh khoản — loại penny có TB dòng tiền quá nhỏ (% bắn ảo). Chấm
+        # trên TB TRỌN phiên chứ không phải nền đã scale: đây là bộ lọc về thanh
+        # khoản vốn có của mã, không được nới lỏng dần theo giờ trong ngày.
         if avg_vnd < min_base_vnd:
             continue
+        base_vnd = avg_vnd * factor   # > 0 vì factor nhỏ nhất là 0.10
 
         price = row.get("price") or 0
         gia_hien_tai = price / scale if price > 0 else candles[-1].get("close", 0)
@@ -92,19 +116,33 @@ def compute_flow_surge_month(
         # Sàn tiền HÔM NAY — bỏ mã đột biến % cao nhưng tiền tuyệt đối bé.
         if today_vnd < min_today_vnd:
             continue
-        pct = round((today_vnd - avg_vnd) / avg_vnd * 100, 2)
+        pct = round((today_vnd - base_vnd) / base_vnd * 100, 2)
+
+        # % tăng GIÁ hôm nay (so giá tham chiếu) — board đã tính sẵn ở
+        # data_source._map_board, không phải dựng lại từ nến. Thiếu cột → 0, tức
+        # hệ số 1.0: mã đó xếp hạng thuần theo dòng tiền thay vì bị loại.
+        pct_gia = row.get("change_pct") or 0
+        gia_tri_ty = today_vnd / _VND_TO_TY
+        diem = pct * math.log10(gia_tri_ty + 1) * (1 + pct_gia / 100)
 
         rows.append(
             {
                 "symbol": symbol,
-                "gia_tri_khop_lenh": round(today_vnd / _VND_TO_TY, 3),  # RIÊNG hôm nay
+                "gia_tri_khop_lenh": round(gia_tri_ty, 3),  # RIÊNG hôm nay
                 "gia_hien_tai": round(gia_hien_tai, 2),
                 "pct_tang": pct,
+                "pct_gia": round(pct_gia, 2),
+                "diem": round(diem, 2),
             }
         )
 
-    rows.sort(key=lambda r: r["pct_tang"], reverse=True)
-    return {"rows": rows[:top_n], "avg_window": avg_window}
+    rows.sort(key=lambda r: r["diem"], reverse=True)
+    return {
+        "rows": rows[:top_n],
+        "avg_window": avg_window,
+        "time_bucket": time_bucket,
+        "baseline_factor": factor,
+    }
 
 
 def get_flow_surge_month(top_n=DEFAULT_TOP_N, avg_window=DEFAULT_AVG_WINDOW):
