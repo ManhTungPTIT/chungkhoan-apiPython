@@ -473,6 +473,48 @@ def _maybe_refresh_sector_flow(now=None):
         _sector_flow_date = today
 
 
+_foreign_backfill_thread = None
+
+
+def backfill_foreign_history():
+    """Quet ~1.575 ma de dung lai lich su khoi ngoai TOAN thi truong."""
+    symbols = _all_symbols_today()
+    if not symbols:
+        return
+    # Cung bo loc voi refresh_sector_flow: ro niem yet con lan trai phieu/chung
+    # quyen, khoi ngoai cua chung khong thuoc thong ke nay.
+    symbols = [s for s in symbols if len(s) == 3 and s.isalpha()]
+    rows = foreign_trading_service.fetch_history_from_vendor(symbols)
+    if foreign_trading_service.apply_backfill(rows):
+        logger.info("backfill khoi ngoai: %d phien tu %d ma", len(rows), len(symbols))
+    else:
+        logger.warning("backfill khoi ngoai that bai — luot refresh sau thu lai")
+
+
+def _maybe_backfill_foreign_history(now=None):
+    """Backfill lich su khoi ngoai (chart "GIAO DICH KHOI NGOAI 30 PHIEN").
+
+    Chi chay khi lich su dang thung — ngay thuong update_history_from_board da
+    boi dung mot dong moi phien tu board co san, khong ton request nao.
+
+    Chay o LUONG RIENG, khong om _refresh_lock: mot luot quet mat ~8 phut (nhip
+    bi bop ve 200 request/phut cho khoi duoi tran 500/phut cua vendor), om khoa
+    thi quotes va board dung hinh nguyen ca 8 phut do. Nhip 200/phut da chua
+    thua han muc cho cac luong refresh chay song song."""
+    global _foreign_backfill_thread
+    if _foreign_backfill_thread is not None and _foreign_backfill_thread.is_alive():
+        return
+    if not foreign_trading_service.needs_backfill(now=now):
+        return
+    _foreign_backfill_thread = threading.Thread(
+        target=_run_step,
+        args=(backfill_foreign_history,),
+        name="foreign-backfill",
+        daemon=True,
+    )
+    _foreign_backfill_thread.start()
+
+
 # Điểm chỉ số (chart "TOÀN CẢNH CHỈ SỐ"): 4 call history/lượt, điểm đổi chậm nên
 # 60s là đủ — giữ đúng ngân sách của bản cũ (memoize TTL 60s) nhưng dời việc fetch
 # từ ĐƯỜNG REQUEST sang luồng nền này.
@@ -779,6 +821,9 @@ def refresh_all():
         # Đặt CUỐI: bước này nặng (~4 phút), chạy trước sẽ trì hoãn mọi snapshot
         # cÃ²n láº¡i á»Ÿ lÆ°á»£t refresh Ä‘áº§u tiÃªn sau khi khá»Ÿi Ä‘á»™ng.
         _run_step(_maybe_refresh_sector_flow)
+        # Buoc nay chi SPAWN luong nen roi tra ve ngay (xem ham) — dat cuoi cho
+        # cung nhom "viec nang", nhung no khong keo dai luot refresh nay.
+        _run_step(_maybe_backfill_foreign_history)
     finally:
         _refresh_lock.release()
 

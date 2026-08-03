@@ -171,8 +171,10 @@ def get_foreign_trading():
 
 @app.get("/api/python/foreign-trading-history")
 def get_foreign_trading_history():
-    """30 phiên gần nhất: tổng mua/bán ròng khối ngoại VN100 + summary hiện tại."""
-    history = foreign_trading_service.get_history_with_fallback()
+    """30 phiên gần nhất: tổng mua/bán/ròng khối ngoại TOÀN thị trường + summary
+    hiện tại. Chỉ ĐỌC cache RAM — backfill lịch sử (~1.000 request) nằm ở luồng
+    nền market_refresher, không bao giờ chạy trên đường request."""
+    history = foreign_trading_service.get_history()
     current = history[-1] if history else foreign_trading_service.get_current_summary()
     return {"history": history, "current": current}
 
