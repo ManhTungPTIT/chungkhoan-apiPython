@@ -40,10 +40,11 @@ from datetime import datetime
 from app.services import flow_surge_service
 from app.services import signal_service
 
-# Nền tích lũy 30 phiên; thanh khoản so với TB 20 phiên (quy ước sẵn có của các
+# Nền tích lũy 10 phiên; thanh khoản so với TB 10 phiên (quy ước sẵn có của các
 # chart dòng tiền). Hai cửa sổ KHÁC nhau là cố ý, không phải nhầm.
-BASE_WINDOW = 30
-AVG_WINDOW = 20
+# đang chỉnh lại 10 phiên để test
+BASE_WINDOW = 10
+AVG_WINDOW = 10
 
 # Số bong bóng trên ảnh nền của chart — nhiều hơn cũng không có chỗ đặt.
 DEFAULT_TOP_N = 15
@@ -66,15 +67,14 @@ _NGHIN_TO_VND = 1000
 _VND_TO_TY = 1_000_000_000
 
 
-def _base_candles(candles, today_iso, base_window):
-    """`base_window` nến ĐÃ ĐÓNG gần nhất, bỏ nến hôm nay nếu nguồn đã trả về.
+def _closed_candles(candles, today_iso):
+    """Bỏ nến hôm nay nếu nguồn đã trả về (phiên chưa đóng).
 
     "30 phiên trước" phải là nền QUÁ KHỨ: để lẫn nến hôm nay thì đỉnh nền tự nâng
     theo chính cú bứt phá đang xét, VượtNền co về ~0 và chart rỗng."""
-    closed = candles
-    if closed and signal_service._candle_date(closed[-1]["time"]) == today_iso:
-        closed = closed[:-1]
-    return closed[-base_window:] if base_window > 0 else []
+    if candles and signal_service._candle_date(candles[-1]["time"]) == today_iso:
+        return candles[:-1]
+    return candles
 
 
 def _baseline_value_vnd(candles, avg_window):
@@ -123,7 +123,14 @@ def compute_base_breakout(
         if not candles:
             continue
 
-        base = _base_candles(candles, today_iso, base_window)
+        # Cắt nến hôm nay MỘT LẦN rồi dùng chung cho cả nền giá lẫn nền thanh
+        # khoản. Trước đây TB20 đọc thẳng `candles`, tức khi nguồn có trả nến
+        # hôm nay thì nền thanh khoản gồm một phiên DỞ DANG → nền tụt xuống,
+        # TỷLệThanhKhoản bị thổi lên, trong khi nền giá lại đã loại phiên đó.
+        # Hai vế của cùng một phép so sánh mà dùng hai tập phiên khác nhau.
+        closed = _closed_candles(candles, today_iso)
+
+        base = closed[-base_window:] if base_window > 0 else []
         # Đủ phiên nền — mã mới niêm yết chưa có nền để mà vượt.
         if len(base) < base_window:
             continue
@@ -147,7 +154,7 @@ def compute_base_breakout(
         gain_from_low_pct = (price - base_low) / base_low * 100
 
         value_vnd = row.get("value") or 0
-        avg_vnd, session_count = _baseline_value_vnd(candles, avg_window)
+        avg_vnd, session_count = _baseline_value_vnd(closed, avg_window)
         if not avg_vnd or avg_vnd <= 0 or session_count < avg_window:
             continue
         # Nền scale theo khung giờ — xem ghi chú đầu file.

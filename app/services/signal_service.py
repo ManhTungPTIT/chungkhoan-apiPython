@@ -116,8 +116,20 @@ RETRY_INTERVAL_S = 60
 # loại tới tận refresh hôm sau. Cho retry vài lần: rỗng-tạm sẽ hồi, rỗng-thật
 # (mã hủy niêm yết) chỉ tốn thêm ≤N fetch rồi thôi.
 MAX_EMPTY_RETRIES = 3
+# Mã ĐANG KHỚP LỆNH THẬT hôm nay (có mặt trong rổ active — value vượt ngưỡng) thì
+# "rỗng" KHÔNG THỂ là sự thật: một mã khớp vài trăm tỷ chắc chắn có nến lịch sử.
+# Với nhóm này, [] luôn là rate-limit tạm → cho retry nhiều hơn hẳn. (Bug MWG
+# 04/08/2026: fetch trả [] ở lượt 15:05, bị xếp "rỗng thật" nên KHÔNG retry lần
+# nào; base không được ghi và panel kẹt ở tín hiệu cache từ 10/07 suốt hôm sau,
+# trong khi chart tính từ /intraday đã báo buy 03/08.)
+ACTIVE_EMPTY_RETRIES = 15
 # {symbol: số lần trả rỗng liên tiếp khi đang pending}
 _empty_counts: dict[str, int] = {}
+
+# Trần số mã được nạp vào hàng đợi vá mỗi lượt (xem _seed_stale_base_pending).
+# Không có trần thì một sự cố diện rộng (vd vừa restart, base mới phủ vài mã) sẽ
+# đẩy cả rổ vào _pending và biến vòng vá thành một đợt nã vnstock.
+MAX_REPAIR_QUEUE = 40
 
 # Tỷ lệ mã active tối thiểu phải đã từng fetch (có mặt trong _volumes). Dưới mức
 # này coi như rổ vừa đổi/mở rộng (nhiều mã mới chưa tính) → warm bù ngay lúc khởi
@@ -458,8 +470,32 @@ def _refresh_one(symbol, history_fn, end):
     _history_candles[symbol] = candles  # base cho tính live trong phiên
     sig = latest_signal(candles)
     if sig is not None:
-        _cache["signals"][symbol] = sig
+        # `base_through` = ngày nến CUỐI CÙNG mà phép tính nhìn thấy. Bắt buộc
+        # phải lưu riêng: `date` là ngày XẢY RA cắt tín hiệu, hoàn toàn không nói
+        # lên dữ liệu mới tới đâu. HDG "sell 03/07" và MWG "sell 10/07" trông y
+        # hệt nhau — cái đầu đúng, cái sau là tín hiệu chết — và không cách nào
+        # phân biệt nếu chỉ nhìn `date`.
+        _cache["signals"][symbol] = {**sig, "base_through": _last_candle_iso(candles)}
     return "ok"
+
+
+def _last_candle_iso(candles):
+    """Ngày ISO của nến cuối, None nếu không đọc được."""
+    day = _last_candle_date(candles)
+    return day.isoformat() if day else None
+
+
+def _active_symbol_set(active_fn=None):
+    """Rổ mã đang khớp lệnh thật hôm nay (value vượt ngưỡng). Rỗng ngoài phiên."""
+    active_fn = active_fn or vn100_service.get_active_symbols
+    return set(active_fn() or ())
+
+
+def _empty_is_transient(symbol, active):
+    """[] từ vnstock có phải rate-limit tạm không?
+
+    Mã đang khớp lệnh thật thì chắc chắn có nến lịch sử → [] chỉ có thể là tạm."""
+    return symbol in active
 
 
 def _record_volume(symbol, raw):
@@ -474,8 +510,12 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
     """Fetch lịch sử từng mã VN100 (throttle), tính tín hiệu cuối, cache ra file.
 
     Vòng 1 quét toàn bộ; mã fetch lỗi (None) gom lại retry ở vòng 2 với backoff
-    luỹ thừa (rate-limit hồi). Mã rỗng ([]) hoặc lỗi cả 2 vòng → GIỮ tín hiệu cũ,
-    không xóa. refresh_lock chặn chạy chồng (trả cache hiện tại nếu đang refresh).
+    luỹ thừa (rate-limit hồi). Mã lỗi cả 2 vòng → GIỮ tín hiệu cũ, không xóa.
+    refresh_lock chặn chạy chồng (trả cache hiện tại nếu đang refresh).
+
+    Mã trả RỖNG ([]) mà đang khớp lệnh thật hôm nay cũng được retry như lỗi: xem
+    _empty_is_transient. Trước đây "empty" bị loại thẳng khỏi vòng retry nên một
+    lần vnstock trả rỗng vì rate-limit là mã đó mất base tới tận 15:05 hôm sau.
     """
     if not _refresh_lock.acquire(blocking=False):
         logger.info("refresh đang chạy — bỏ qua lần gọi chồng")
@@ -486,7 +526,11 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
         # không quét toàn nhóm VN100. Lúc thị trường đóng (vd lịch 07:00 hoặc boot
         # trước giờ mở cửa) mọi mã có value phiên hôm nay = 0 → active rỗng; fallback
         # nguyên nhóm VN100 để vẫn tính được trên nến ngày đã đóng (không thành no-op).
-        symbols = vn100_service.get_active_symbols() or vn100_service.get_symbols()
+        # Giữ NGUYÊN thứ tự của get_active_symbols (rổ đã sắp theo value) — đổi
+        # sang set rồi list lại là mất thứ tự ưu tiên khi bị rate-limit giữa chừng.
+        active_list = vn100_service.get_active_symbols() or []
+        active = set(active_list)
+        symbols = active_list or vn100_service.get_symbols()
         if not symbols:
             return _cache
         end = datetime.now(VN_TZ).strftime("%Y-%m-%d")
@@ -494,7 +538,10 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
         # Vòng 1: toàn bộ mã (pace như cũ qua throttle_s)
         failed = []
         for idx, symbol in enumerate(symbols):
-            if _refresh_one(symbol, history_fn, end) == "error":
+            outcome = _refresh_one(symbol, history_fn, end)
+            if outcome == "error" or (
+                outcome == "empty" and _empty_is_transient(symbol, active)
+            ):
                 failed.append(symbol)
             if throttle_s and idx < len(symbols) - 1:
                 sleep_fn(throttle_s)
@@ -510,7 +557,13 @@ def refresh_signals(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sleep)
                 outcome = _refresh_one(symbol, history_fn, end)
                 if idx < len(failed) - 1:
                     sleep_fn(delay)  # nghỉ delay HIỆN TẠI trước mã kế
-                if outcome == "error":
+                # "empty" của mã đang khớp lệnh thật cũng là hỏng (xem
+                # _empty_is_transient) — phải theo cùng đường backoff và cùng rơi
+                # vào _pending, không thì vòng 2 lại âm thầm bỏ rơi đúng nhóm mã
+                # mà vòng 1 vừa cố cứu.
+                if outcome == "error" or (
+                    outcome == "empty" and _empty_is_transient(symbol, active)
+                ):
                     still_failed.append(symbol)
                     delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_BACKOFF_S)
                 else:
@@ -542,14 +595,22 @@ def retry_pending_once(history_fn=None, throttle_s=THROTTLE_S, sleep_fn=time.sle
             return _pending
         history_fn = history_fn or data_source.fetch_intraday_history
         end = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+        active = _active_symbol_set()
         remaining = []
         for idx, symbol in enumerate(pending):
             outcome = _refresh_one(symbol, history_fn, end)
             if outcome == "error":
                 remaining.append(symbol)
             elif outcome == "empty":
+                # Mã đang khớp lệnh thật được kiên nhẫn hơn hẳn: với nó [] không
+                # thể là "rỗng thật" nên bỏ sớm là tự tay tạo ra tín hiệu chết.
+                cap = (
+                    ACTIVE_EMPTY_RETRIES
+                    if _empty_is_transient(symbol, active)
+                    else MAX_EMPTY_RETRIES
+                )
                 _empty_counts[symbol] = _empty_counts.get(symbol, 0) + 1
-                if _empty_counts[symbol] < MAX_EMPTY_RETRIES:
+                if _empty_counts[symbol] < cap:
                     remaining.append(symbol)  # rỗng-tạm (rate-limit) → thử lại
                 else:
                     _empty_counts.pop(symbol, None)  # rỗng-thật → thôi, dọn đếm
@@ -695,11 +756,16 @@ def _live_signal(symbol, row, today):
     Thiếu base (chưa refresh/khởi động lại), row thiếu OHLC, hoặc nến live là
     nến ma (xem _phantom_candle) → None để caller fallback về tín hiệu đã cache
     (_cache["signals"])."""
-    base = _history_candles.get(symbol)
     live = _live_candle(row, today)
-    if not base or live is None:
+    if live is None:
         return None
-    base = _refresh_base_from_intraday_cache(symbol, base, today)
+    # Cứu hộ phải chạy TRƯỚC chốt "thiếu base": nó sinh ra đúng để vá base
+    # thiếu/cũ, mà đặt sau chốt thì với mã mất hẳn base — ca duy nhất nó thực sự
+    # cần thiết — hàm đã thoát mất rồi. (Bug MWG 04/08/2026: cache /intraday có
+    # sẵn nến tươi trong cùng tiến trình mà panel vẫn kẹt tín hiệu từ 10/07.)
+    base = _refresh_base_from_intraday_cache(symbol, _history_candles.get(symbol), today)
+    if not base:
+        return None
     if _base_stale_for_live(base, today):
         return None
     if _phantom_candle(base[-1], live, today):
@@ -727,13 +793,23 @@ def attach_signals(board, now=None):
     cho test bơm ngày cố định; mặc định lấy ngày hiện tại (giờ VN)."""
     today = (now or datetime.now(VN_TZ)).date().isoformat()
     sigs = _cache["signals"]
+    market_base = _market_base_date()
+    unverified = []
     for row in board:
         symbol = row.get("symbol")
         # Ưu tiên tín hiệu LIVE (ghép giá hôm nay vào base nến) để tín hiệu cắt
         # TRONG PHIÊN hiện ngay, không đợi 15:05. Nến hôm nay còn hình thành nên
         # tín hiệu có thể lật lại nếu giá đảo chiều trước giờ đóng cửa (whipsaw) —
         # chấp nhận đánh đổi này để panel phản ánh diễn biến thực trong phiên.
-        entry = _live_signal(symbol, row, today) or sigs.get(symbol)
+        live = _live_signal(symbol, row, today)
+        entry = live or sigs.get(symbol)
+        # Tính được LIVE nghĩa là base vừa được kiểm và phủ tới phiên đóng gần
+        # nhất → tín hiệu chắc chắn hiện hành. Rơi về cache thì phải soi xem cái
+        # cache đó được tính từ dữ liệu tới ngày nào.
+        stale = bool(entry) and live is None and _base_behind_market(entry, market_base)
+        row["signal_stale"] = stale
+        if stale:
+            unverified.append(symbol)
         row["signal"] = entry["signal"] if entry else None
         row["signal_date"] = entry["date"] if entry else None
         row["signal_price"] = entry["price"] if entry else None
@@ -748,6 +824,9 @@ def attach_signals(board, now=None):
         row["signal_hold"] = bool(
             entry and entry["signal"] == "buy" and entry["date"] != today
         )
+    # Xếp hàng vá NGAY tại chỗ phát hiện: vòng vá nền vét mỗi phút nên mã hỏng tự
+    # khỏi trong vòng ~1 phút thay vì đợi mốc 15:05 hôm sau.
+    _seed_stale_base_pending(unverified)
     return board
 
 
@@ -789,6 +868,65 @@ def _history_gap_symbols():
     return [s for s in _cache["signals"] if s not in _history_candles]
 
 
+def _market_base_date():
+    """Ngày nến cuối MỚI NHẤT trên toàn bộ base — mốc "thị trường đã có tới đâu".
+
+    Lấy mốc từ chính dữ liệu thay vì suy từ lịch (`_previous_weekday`): lịch không
+    biết nghỉ lễ, nên sáng sau một kỳ nghỉ nó sẽ đòi một phiên KHÔNG TỒN TẠI và
+    gắn cờ "chưa xác minh" cho cả bảng. Đa số mã luôn được refresh thành công nên
+    max này chính là phiên đóng gần nhất có thật.
+
+    None khi chưa có base nào (vừa restart) → không kết luận gì, không gắn cờ."""
+    latest = None
+    for candles in _history_candles.values():
+        day = _last_candle_date(candles)
+        if day and (latest is None or day > latest):
+            latest = day
+    return latest
+
+
+def _base_behind_market(entry, market_base):
+    """Tín hiệu cache này có được tính từ dữ liệu CŨ HƠN phần còn lại của thị
+    trường không?
+
+    `entry["base_through"]` thiếu = cache ghi bởi bản cũ chưa có trường này →
+    không xác minh được → coi như chưa xác minh (thà báo thừa còn hơn tiếp tục
+    trình bày một tín hiệu chết như thể nó đang đúng)."""
+    if market_base is None:
+        return False
+    through = (entry or {}).get("base_through")
+    if not through:
+        return True
+    try:
+        return date.fromisoformat(through) < market_base
+    except (TypeError, ValueError):
+        return True
+
+
+def _seed_stale_base_pending(symbols):
+    """Nối mã có tín hiệu chưa xác minh vào ĐẦU _pending để vá trước tiên.
+
+    Chèn lên đầu chứ không nối đuôi: nhóm này đang HIỂN THỊ SAI cho người dùng
+    ngay lúc này, trong khi phần còn lại của hàng đợi phần lớn là mã rate-limit
+    chưa có tín hiệu (chưa hiện gì cả). Một lượt vét 40 mã ở throttle 1.1s mất
+    ~44s, nên xếp sau hay trước chênh nhau gần một phút.
+
+    Chặn trần MAX_REPAIR_QUEUE: sự cố diện rộng (vd base mới phủ vài mã sau
+    restart) không được biến thành một đợt nã vnstock hàng trăm request."""
+    if _in_quiet_window():
+        return
+    room = MAX_REPAIR_QUEUE - len(_pending)
+    if room <= 0:
+        return
+    them = []
+    for symbol in symbols:
+        if len(them) >= room:
+            break
+        if symbol and symbol not in _pending and symbol not in them:
+            them.append(symbol)
+    _pending[:0] = them
+
+
 def _seed_history_gap_pending():
     """Nối mã gap (có tín hiệu, thiếu base) vào _pending — được _drain_pending
     vét mỗi phút như mã rate-limit thường: fetch được là có base, live signal
@@ -816,6 +954,27 @@ async def _drain_pending(sleep_s=RETRY_INTERVAL_S):
     while _pending:
         await asyncio.sleep(sleep_s)
         await asyncio.to_thread(retry_pending_once)
+
+
+async def repair_loop(sleep_s=RETRY_INTERVAL_S):
+    """Vòng vá NỀN, sống suốt đời tiến trình.
+
+    Khác _drain_pending (chạy một đợt rồi thoát khi hàng đợi rỗng): attach_signals
+    nạp hàng đợi BẤT KỲ LÚC NÀO trong phiên khi phát hiện tín hiệu chưa xác minh,
+    nên phải có ai đó vét đều đặn. Không có vòng này thì mã hỏng giữa phiên nằm im
+    trong _pending tới tận lượt refresh 15:05.
+
+    Ngủ TRƯỚC rồi mới vét: lúc gọi thì _drain_pending vừa chạy xong, vét ngay là
+    thừa. Im lặng trong QUIET_WINDOW theo đúng nguyên tắc không gọi vnstock trước
+    giờ mở cửa."""
+    while True:
+        await asyncio.sleep(sleep_s)
+        if _in_quiet_window():
+            continue
+        _seed_history_gap_pending()
+        _seed_newly_active_pending()
+        if _pending:
+            await asyncio.to_thread(retry_pending_once)
 
 
 def _coverage_gap(active_fn=None):
@@ -878,6 +1037,9 @@ async def scheduler_loop():
     if not _in_quiet_window() and (stale or (_coverage_gap() and not _is_market_hours())):
         await asyncio.to_thread(refresh_signals)
     await _drain_pending()
+    # Vòng vá nền chạy song song, KHÔNG await: nó không bao giờ kết thúc, await ở
+    # đây là chặn luôn lịch refresh 15:05.
+    asyncio.create_task(repair_loop())
     while True:
         await asyncio.sleep(_seconds_until_next_refresh())
         await asyncio.to_thread(refresh_signals)
