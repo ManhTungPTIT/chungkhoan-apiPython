@@ -20,7 +20,21 @@ Sáu bộ lọc (đều phải đạt):
 đã thoát) hay 5% (đã chạy) đều bị hạ điểm. log10 để một mã thanh khoản gấp 20 lần
 không đè bẹp toàn bảng. (1 - BiênĐộNền/100) thưởng nền càng hẹp càng tốt.
 
-HAI QUY ƯỚC QUAN TRỌNG, đừng "sửa cho đúng" nếu chưa đọc:
+ĐỈNH/ĐÁY NỀN TÍNH THEO **THÂN NẾN**, KHÔNG LẤY RÂU:
+
+    ĐỉnhNền = max(max(open, close)) trên cửa sổ nền
+    ĐáyNền  = min(min(open, close)) trên cửa sổ nền
+
+Râu nến là vùng giá bị TỪ CHỐI — chạm tới nhưng không giữ được tới lúc đóng. Lấy
+râu làm đỉnh nền thì một cú quét thanh khoản trong đúng một phiên sẽ nâng đỉnh
+nền suốt cả cửa sổ, và mã bứt phá thật sau đó lại không được tính là "vượt nền".
+
+BA QUY ƯỚC QUAN TRỌNG, đừng "sửa cho đúng" nếu chưa đọc:
+
+0. `GiáHiệnTại` là giá KHỚP GẦN NHẤT từ price board, không phải giá đóng cửa —
+   trong phiên nó chạy liên tục nên VượtNền nhấp nháy theo, sau 15:00 mới trùng
+   giá đóng cửa. Cố ý: chart này để bắt cú bứt phá ĐANG diễn ra.
+
 
 1. "Thanh khoản" ở đây là TIỀN khớp lệnh (VND), không phải khối lượng — khớp chủ
    đề "dòng tiền xác nhận" và trùng quy ước TB20 của flow_surge_month_service.
@@ -75,6 +89,43 @@ def _closed_candles(candles, today_iso):
     if candles and signal_service._candle_date(candles[-1]["time"]) == today_iso:
         return candles[:-1]
     return candles
+
+
+def body_top_bottom(candle):
+    """(đỉnh, đáy) của THÂN nến — bỏ râu: max/min(open, close).
+
+    Râu nến là vùng giá bị TỪ CHỐI: giá có chạm tới nhưng không giữ được tới lúc
+    đóng. Lấy râu làm đỉnh nền khiến một cú quét thanh khoản trong một phiên nâng
+    đỉnh nền lên cả tháng, và mã sau đó bứt phá thật lại không được tính là "vượt
+    nền". Thân nến mới là vùng giá thị trường thực sự chấp nhận.
+
+    Nến thiếu `open` (cache lịch sử ghi bởi bản trước khi `_to_candles` giữ trường
+    này) → lấy `close` cho cả hai đầu. Đây là suy biến TẠM THỜI, tự hết sau lượt
+    refresh kế; thân suy biến luôn NẰM TRONG thân thật nên không bao giờ nới rộng
+    nền quá mức."""
+    close = candle.get("close")
+    if not close:            # 0 hoặc thiếu → nến hỏng, bỏ hẳn
+        return None, None
+    open_ = candle.get("open")
+    # Phân biệt VẮNG MẶT với giá 0: `open` = 0 là dữ liệu HỎNG và phải kéo đáy
+    # nền về 0 để mã đó bị loại ở bước sau, chứ không được âm thầm thay bằng
+    # close (`or` sẽ làm đúng như vậy vì 0.0 là falsy).
+    if open_ is None:
+        open_ = close
+    return max(open_, close), min(open_, close)
+
+
+def _body_range(candles):
+    """(đỉnh nền, đáy nền) theo thân nến trên cả cửa sổ. (None, None) nếu rỗng."""
+    tops, bottoms = [], []
+    for candle in candles:
+        top, bottom = body_top_bottom(candle)
+        if top is not None:
+            tops.append(top)
+            bottoms.append(bottom)
+    if not tops:
+        return None, None
+    return max(tops), min(bottoms)
 
 
 def _baseline_value_vnd(candles, avg_window):
@@ -135,13 +186,8 @@ def compute_base_breakout(
         if len(base) < base_window:
             continue
 
-        highs = [c["high"] for c in base if c.get("high")]
-        lows = [c["low"] for c in base if c.get("low")]
-        if not highs or not lows:
-            continue
-        base_high = max(highs)
-        base_low = min(lows)
-        if base_low <= 0 or base_high <= 0:
+        base_high, base_low = _body_range(base)
+        if base_high is None or base_low <= 0 or base_high <= 0:
             continue
 
         price_raw = row.get("price") or 0

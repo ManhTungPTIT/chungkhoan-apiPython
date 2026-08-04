@@ -358,6 +358,14 @@ def _to_candles(raw):
             candle["volume"] = int(float(r["volume"]))
         except (KeyError, TypeError, ValueError):
             pass
+        # Giá mở cửa — cần cho chart "vượt nền" (đỉnh/đáy nền tính theo THÂN nến,
+        # tức max/min(open, close), bỏ râu nến). Cũng tùy nguồn có/không nên xử lý
+        # y như volume: thiếu thì bỏ key chứ không loại nến, vì các luồng khác
+        # (tín hiệu SMA/MACD) chỉ cần high/low/close.
+        try:
+            candle["open"] = float(r["open"])
+        except (KeyError, TypeError, ValueError):
+            pass
         out.append(candle)
     return out
 
