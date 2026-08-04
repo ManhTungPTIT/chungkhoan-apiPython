@@ -153,8 +153,8 @@ def build_board(board: list[dict], now=None) -> dict:
 def build_power_board(board: list[dict]) -> dict:
     """Dựng payload /power (bản đồ sức mạnh dòng tiền) từ board ĐÃ fetch sẵn:
     lọc value + sort (cùng _process với /vn100) rồi giữ lại mã thuộc rổ VN100,
-    mỗi dòng chỉ 4 field symbol/price/change_pct/value — payload nhỏ, không
-    kèm signal (trang power không dùng).
+    mỗi dòng chỉ 5 field symbol/price/change_pct/value/avg_value_20 — payload
+    nhỏ, không kèm signal (trang power không dùng).
 
     Chưa lấy được danh sách VN100 (rỗng) → giữ nguyên board đã lọc value
     (degrade mềm, tự lành khi get_vn100_members lấy được ở chu kỳ sau).
@@ -166,8 +166,38 @@ def build_power_board(board: list[dict]) -> dict:
     return _power_payload(rows)
 
 
+def _history_avg_values(symbols: set[str], avg_window: int = 20) -> dict[str, float]:
+    """TB value `avg_window` phiên gần nhất (VND) theo mã, đọc nến ngày ĐÃ nằm sẵn
+    trong RAM của signal_service → 0 request vnstock.
+
+    Import trễ vì flow_surge_service → signal_service → vn100_service là vòng lặp
+    import (cùng lý do với build_board). Mã thiếu nến / nến không đủ volume+close
+    bị bỏ khỏi dict, caller tự hiểu là None.
+    """
+    from app.services import flow_surge_service, signal_service
+
+    history = getattr(signal_service, "_history_candles", None) or {}
+    out: dict[str, float] = {}
+    for symbol in symbols:
+        candles = history.get(symbol)
+        if not candles:
+            continue
+        avg = flow_surge_service._avg_history_value_vnd(candles, avg_window)
+        if avg and avg > 0:
+            out[symbol] = avg
+    return out
+
+
 def _power_payload(rows: list[dict]) -> dict:
-    """Chiếu rows về payload /power: mỗi dòng đúng 4 field."""
+    """Chiếu rows về payload /power: mỗi dòng đúng 5 field.
+
+    `avg_value_20` là NỀN thô (TB value 20 phiên, VND) để FE tính % đột biến dòng
+    tiền — FE tự nhân tỉ lệ kỳ vọng theo khung giờ, BE không scale sẵn để bảng
+    khung giờ đổi được mà không phải chạm BE. None khi chưa đủ nến (mã mới niêm
+    yết, hoặc cache nến chưa warm sau restart) → FE bỏ qua tiêu chí đột biến cho
+    riêng mã đó.
+    """
+    avgs = _history_avg_values({r["symbol"] for r in rows})
     return {
         "data": [
             {
@@ -175,6 +205,7 @@ def _power_payload(rows: list[dict]) -> dict:
                 "price": r.get("price"),
                 "change_pct": r.get("change_pct"),
                 "value": r.get("value"),
+                "avg_value_20": avgs.get(r["symbol"]),
             }
             for r in rows
         ]

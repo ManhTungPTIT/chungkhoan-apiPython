@@ -31,6 +31,7 @@ from app.services import sector_breadth_service
 from app.services import sector_flow_service
 from app.services import sector_service
 from app.services import signal_service
+from app.services import base_breakout_service
 from app.services import bull_bear_service
 from app.services import flow_surge_service
 from app.services import flow_surge_month_service
@@ -289,6 +290,19 @@ def get_flow_surge_month(
     × (1 + % tăng giá / 100); % đột biến so với TB 20 phiên đã scale theo khung
     giờ, dùng chung bảng của flow-surge. Đọc snapshot board + nến base RAM."""
     return flow_surge_month_service.get_flow_surge_month(top_n, avg_window)
+
+
+@app.get("/api/python/base-breakout")
+def get_base_breakout(
+    top_n: int = Query(15, ge=1, le=50, description="Số mã trả về (chart có 15 chỗ)"),
+):
+    """Chart 'TOP MÃ VƯỢT NỀN TÍCH LŨY 30 PHIÊN': mã đi ngang trong nền hẹp 30
+    phiên rồi vừa vượt lên trên đỉnh nền, kèm thanh khoản bật so với TB 20 phiên.
+    Lọc: biên độ nền ≤ 15%, vượt nền 0.5–5%, tăng từ đáy ≤ 18%, thanh khoản ≥
+    1.5× nền (đã scale theo khung giờ), GTGD ≥ 1 tỷ. Xếp theo ĐiểmBậtNền. Trả
+    kèm `summary` tính trên TẤT CẢ mã qua lọc, không chỉ `top_n` mã trả về. Đọc
+    snapshot board + nến base RAM, không gọi vnstock."""
+    return base_breakout_service.get_base_breakout(top_n)
 
 
 @app.get("/api/python/market-status")

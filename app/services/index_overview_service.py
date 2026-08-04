@@ -138,6 +138,43 @@ def exchange_today_values(board_rows, exchange_map, vn30_members=None, universe=
     return totals
 
 
+def put_through_values(deals, exchange_map, vn30_members=None):
+    """Giá trị THỎA THUẬN hôm nay mỗi nhóm (VND), gom từ snapshot `put_through`.
+
+    Board của vendor CHỈ có khớp lệnh — PVD phiên 2026-08-03 thỏa thuận 11,85
+    triệu cp mà board chỉ ghi 1,71 triệu. Đối chiếu với nến ngày VNINDEX (mang
+    tổng khối lượng toàn sàn), tổng tự cộng chỉ ra ~90% và thiếu ổn định qua mọi
+    phiên; phần hụt lớn nhất chính là thỏa thuận (HOSE 2026-08-03: khớp lệnh 7,11
+    + thỏa thuận 1,02 nghìn tỷ).
+
+    Lọc mã 3 ký tự chữ như put_through_service: bảng thỏa thuận HNX/UPCOM phần
+    lớn là TRÁI PHIẾU doanh nghiệp (LPB125006…) và chúng thường to hơn cổ phiếu —
+    không lọc thì cột thanh khoản cổ phiếu bị trái phiếu thổi phồng.
+
+    Ưu tiên `exchange_map` cho khớp bucket với phía khớp lệnh; mã không có trong
+    bản đồ thì đọc `exchange` ngay trên lệnh, không thì lệnh rơi vào hư không.
+    """
+    from app.services import put_through_service
+
+    totals = dict.fromkeys(_ALL_GROUPS, 0)
+    vn30 = set(vn30_members or [])
+    for deal in deals or []:
+        symbol = deal.get("symbol") if isinstance(deal, dict) else None
+        if not put_through_service.is_stock_symbol(symbol):
+            continue
+        value = deal.get("value") or 0
+        if value <= 0:
+            continue
+        exch = data_source._normalize_exchange(
+            (exchange_map or {}).get(symbol) or deal.get("exchange")
+        )
+        if exch in totals:
+            totals[exch] += value
+        if symbol in vn30:
+            totals["VN30"] += value
+    return totals
+
+
 def liquidity_pct(today_values, avg_values):
     """{group: %} — hôm nay so với nền. None khi thiếu nền (mẫu số 0/vắng mặt);
     0.0 là giá trị THẬT (chưa có giao dịch), không nhập nhằng với thiếu dữ liệu."""
@@ -151,10 +188,23 @@ def liquidity_pct(today_values, avg_values):
     return out
 
 
-def compute_index_overview(index_points, exchange_values, liquidity=None, so_phien_tb=0):
+def compute_index_overview(
+    index_points, exchange_values, liquidity=None, so_phien_tb=0, put_through=None
+):
     """Hàm thuần: index_points {symbol: {current, prev}} + exchange_values
-    {group: value_vnd} + liquidity {group: pct} → payload chart. Index thiếu điểm
-    vẫn ra row (điểm/%=None); thiếu nền lịch sử thì chỉ thanh_khoan_pct=None."""
+    {group: value_vnd} + liquidity {group: pct} + put_through {group: value_vnd}
+    → payload chart. Index thiếu điểm vẫn ra row (điểm/%=None); thiếu nền lịch sử
+    thì chỉ thanh_khoan_pct=None; thiếu snapshot thỏa thuận thì cột hiển thị lùi
+    về đúng khớp lệnh chứ không bỏ trống.
+
+    Ba trường tiền, ĐỪNG lẫn:
+      - `gia_tri_khop_lenh`  : chỉ khớp lệnh (giữ nguyên nghĩa cũ)
+      - `gia_tri_thoa_thuan` : chỉ thỏa thuận
+      - `gia_tri_giao_dich`  : tổng hai cái trên — ĐÂY là cột chart vẽ
+    `thanh_khoan_pct` vẫn so khớp-lệnh-với-khớp-lệnh: nền lịch sử
+    (sector_flow_history) không có thỏa thuận, cộng vào tử số thôi là tỷ lệ phồng
+    lên có hệ thống.
+    """
     rows = []
     for cfg in INDICES:
         pts = (index_points or {}).get(cfg["symbol"]) or {}
@@ -167,12 +217,15 @@ def compute_index_overview(index_points, exchange_values, liquidity=None, so_phi
             else None
         )
         value_vnd = (exchange_values or {}).get(cfg["group"]) or 0
+        pt_vnd = (put_through or {}).get(cfg["group"]) or 0
         rows.append(
             {
                 "ten_san": cfg["name"],
                 "diem_hien_tai": round(current, 2) if current is not None else None,
                 "diem_dong_cua_phien_truoc": round(prev, 2) if prev is not None else None,
                 "gia_tri_khop_lenh": round(value_vnd / _NGHIN_TY, 2),  # nghìn tỷ
+                "gia_tri_thoa_thuan": round(pt_vnd / _NGHIN_TY, 2),
+                "gia_tri_giao_dich": round((value_vnd + pt_vnd) / _NGHIN_TY, 2),
                 "thanh_khoan_pct": (liquidity or {}).get(cfg["group"]),
                 "diem_tang_giam": change,
                 "pct": pct,
@@ -306,7 +359,14 @@ def get_index_overview():
     )
     liquidity = liquidity_pct(today_values, avg_values)
 
+    # Thỏa thuận: dùng CHUNG snapshot với chart "dòng tiền giao dịch thỏa thuận",
+    # không phát sinh request nào. Snapshot lỗi/chưa nạp → cột lùi về khớp lệnh.
+    deals = market_cache.get_snapshot("put_through") or []
+    put_through = put_through_values(deals, exchange_map, vn30_members)
+
     index_points = _index_points_cached()
-    result = compute_index_overview(index_points, exchange_values, liquidity, so_phien_tb)
+    result = compute_index_overview(
+        index_points, exchange_values, liquidity, so_phien_tb, put_through
+    )
     result["generated_at"] = datetime.now(VN_TZ).isoformat()
     return result
