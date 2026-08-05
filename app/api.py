@@ -415,7 +415,16 @@ def get_put_through(
 
 @app.get("/api/python/heatmap")
 def get_heatmap():
-    
+    """Chart 'BẢN ĐỒ NHIỆT THỊ TRƯỜNG': ngành → mã, kèm giá + trần/sàn/tham chiếu
+    để FE phân loại 5 mức bảng giá.
+
+    Dựng từ snapshot market_board_full — CÙNG nguồn với /market-status ('Bức tranh
+    thị trường') nên hai chart luôn cùng tập mã, cùng thời điểm. board_vn100 chỉ
+    còn là fallback lúc boot đầu tiên: rổ của nó hẹp hơn (VNALL+HNX, thiếu ~198 mã
+    đa số UPCOM) và chỉ refresh 1 tiếng/lần."""
+    full = sector_service.heatmap_from_market_board()
+    if full is not None:
+        return full
     snap = market_cache.get_snapshot("board_vn100")
     if snap:
         return snap["heatmap"]

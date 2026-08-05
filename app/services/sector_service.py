@@ -125,6 +125,13 @@ def heatmap_view(groups: list[dict]) -> list[dict]:
 
     market_cap tạm dùng 'value' (giá trị giao dịch lũy kế) làm đại lượng kích
     thước ô — đổi sang vốn hóa thật khi nguồn dữ liệu có số cổ phiếu lưu hành.
+
+    Kèm price/ref/ceiling/floor để FE phân loại 5 mức bảng giá bằng ĐÚNG luật của
+    market_status_service (so giá với trần/sàn thật). Chỉ đưa change_pct thì FE
+    buộc phải đoán trần/sàn bằng ngưỡng cứng ±6.5%, sai với HNX (±10%) và UPCOM
+    (±15%) — hai chart cùng nói "toàn thị trường" mà ra hai con số khác nhau.
+    Ép về 0 khi thiếu: board dựng trước thay đổi này (cache đĩa cũ) không có
+    ceiling/floor, để None lọt ra JSON là FE so sánh giá sai.
     """
     return [
         {
@@ -135,12 +142,36 @@ def heatmap_view(groups: list[dict]) -> list[dict]:
                     "symbol": s["symbol"],
                     "change_pct": s.get("change_pct", 0),
                     "market_cap": s.get("value") or 0,
+                    "price": s.get("price") or 0,
+                    "ref": s.get("ref") or 0,
+                    "ceiling": s.get("ceiling") or 0,
+                    "floor": s.get("floor") or 0,
                 }
                 for s in g["symbols"]
             ],
         }
         for g in groups
     ]
+
+
+def heatmap_from_market_board(
+    industry_fn=data_source.fetch_industry_map,
+) -> list[dict] | None:
+    """Bản đồ nhiệt dựng từ snapshot `market_board_full` (toàn TT, nhịp ~20s).
+
+    Đây là CÙNG nguồn mà market_status_service đọc, nên bản đồ nhiệt và chart
+    "Bức tranh thị trường" luôn nói về cùng một tập mã tại cùng một thời điểm.
+    Snapshot `board_vn100` trước đây chỉ có rổ VNALL+HNX và refresh 1 tiếng/lần
+    (BOARD_VN100_INTERVAL_S) → thiếu ~198 mã (đa số UPCOM) và đứng hình trong phiên.
+
+    Trả None khi chưa có snapshot (boot lần đầu) để endpoint tự fallback.
+    """
+    from app.data import market_cache
+
+    rows = market_cache.get_snapshot("market_board_full")
+    if not rows:
+        return None
+    return heatmap_view(_build_groups(rows, get_industry_map(industry_fn)))
 
 
 def sector_symbols_view(groups: list[dict], icb_code: str) -> dict:

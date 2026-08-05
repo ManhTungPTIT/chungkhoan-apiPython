@@ -106,6 +106,9 @@ def _board_has_trades(board) -> bool:
 
 
 def _build_board_vn100_snapshot(board):
+    # Key `heatmap` ở đây chỉ còn là ĐƯỜNG LÙI lúc boot: /heatmap dựng thẳng từ
+    # market_board_full (toàn TT, nhịp ~20s) để khớp /market-status — rổ VNALL+HNX
+    # của snapshot này hẹp hơn ~198 mã và chỉ refresh 1 tiếng/lần.
     groups = sector_service.build_groups(board)
     return {
         "vn100": vn100_service.build_board(board),
