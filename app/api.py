@@ -20,7 +20,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.realtime import dnse_stream
@@ -43,6 +43,7 @@ from app.services import put_through_service
 from app.realtime import tick_hub
 from app.services import top_gain_service
 from app.services import tplus_wave_service
+from app.services import bot_signal_service
 from app.services import vn100_service
 from app.services import vn30_basket_service
 from app.services import foreign_trading_service
@@ -142,6 +143,23 @@ def get_vn100():
     if snap:
         return snap["vn100"]
     return vn100_service.get_board()  # fallback: cache chÃ†Â°a warm / luÃ¡Â»â€œng nÃ¡Â»Ân chÃ¡ÂºÂ¿t
+
+
+@app.get("/api/python/signals")
+def get_bot_signals(bot: str = ""):
+    """Lớp phủ tín hiệu theo BOT cho trang bộ lọc — CHỈ phần tín hiệu, khoá theo
+    mã; giá/%/ngành FE đã có từ /vn100.
+
+    Bot lạ hoặc thiếu → 400. KHÔNG rơi về Trend: im lặng trả Trend khi được hỏi
+    T+ chính là con bug đã sửa 03/08 (xem botSignals.js:16-30), lần này chặn ngay
+    ở tầng API."""
+    try:
+        return bot_signal_service.build_overlay(bot)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"bot không hợp lệ: {bot!r} (nhận: trend, t, long)",
+        )
 
 
 @app.get("/api/python/quotes")

@@ -227,8 +227,24 @@ def _normalize_candle_time(time_value):
     raise ValueError("invalid candle time")
 
 
+def _body_low(candle):
+    """Đáy THÂN nến (min(open, close)) — giá hiển thị điểm MUA, bỏ râu nến.
+    Nến thiếu `open` (history cache ghi bởi bản cũ / nguồn không có) → fallback
+    `low` như hành vi trước, tránh KeyError và tránh đoán mò close."""
+    o = candle.get("open")
+    return min(o, candle["close"]) if o is not None else candle["low"]
+
+
+def _body_high(candle):
+    """Đỉnh THÂN nến (max(open, close)) — giá hiển thị điểm BÁN, bỏ râu nến.
+    Thiếu `open` → fallback `high` (xem _body_low)."""
+    o = candle.get("open")
+    return max(o, candle["close"]) if o is not None else candle["high"]
+
+
 def compute_signals(candles):
-    """Máy trạng thái flat↔long. candles: list dict {time, high, low, close}.
+    """Máy trạng thái flat↔long. candles: list dict {time, high, low, close}
+    (+ `open` nếu nguồn có — dùng neo giá hiển thị theo thân nến).
 
     Ánh xạ index như JS: SMA20 tại nến i = ma20[i-19]; MACD = macd[i-25];
     Signal = sig[i-33]. Vòng lặp bắt đầu i=34 (cần ≥35 nến).
@@ -251,7 +267,7 @@ def compute_signals(candles):
                     {
                         "signal": "buy",
                         "date": _candle_date(candles[i]["time"]),
-                        "price": candles[i]["low"],  # neo ở giá thấp nhất nến
+                        "price": _body_low(candles[i]),  # neo ở đáy THÂN nến (bỏ râu)
                     }
                 )
                 in_long = True
@@ -260,11 +276,180 @@ def compute_signals(candles):
                 {
                     "signal": "sell",
                     "date": _candle_date(candles[i]["time"]),
-                    "price": candles[i]["high"],  # neo ở giá cao nhất nến
+                    "price": _body_high(candles[i]),  # neo ở đỉnh THÂN nến (bỏ râu)
                 }
             )
             in_long = False
     return signals
+
+def _with_derived_open(candles):
+    """Lấp `open` thiếu bằng close của nến TRƯỚC, cho riêng đường T+.
+
+    Trả (candles, derived). `derived=True` nghĩa là ít nhất một nến phải suy —
+    caller gắn cờ `open_derived` để chỗ lệch với biểu đồ truy được.
+    Nến ĐẦU dãy thiếu `open` → (None, False): không có mốc nào để suy, mã đó bị
+    bỏ khỏi bảng T+.
+
+    ĐÁNH ĐỔI (spec §5): T+ dùng `close > open` = "nến xanh"; thay `open` bằng
+    close phiên trước biến nó thành `close > close[k-1]` = "tăng so phiên trước".
+    Mã có gap ATO thì hai thứ này khác nhau, và FE vẽ marker bằng nến /intraday
+    có `open` THẬT — nên đúng nhóm mã phải suy là nhóm bảng và biểu đồ có thể lệch.
+
+    KHÔNG sửa tại chỗ: `_history_candles` dùng chung cho mọi bot, sửa vào đó là
+    Trend/Dài hạn đọc phải `open` bịa ra (chúng dùng `open` để neo giá hiển thị).
+    """
+    if not candles:
+        return [], False
+    if candles[0].get("open") is None:
+        return None, False
+
+    out = []
+    derived = False
+    prev_close = None
+    for candle in candles:
+        if candle.get("open") is None:
+            out.append({**candle, "open": prev_close})
+            derived = True
+        else:
+            out.append(candle)
+        prev_close = candle["close"]
+    return out, derived
+
+
+def compute_signals_t(candles):
+    """BOT T+ — port của generateSignalsT (indicators.js).
+
+    Cấu trúc price-action + hướng của Histogram MACD, máy trạng thái flat↔long
+    như compute_signals.
+
+    MUA: đỉnh và đáy đều cao hơn nến trước, nến XANH, đóng cửa vượt đỉnh của cả
+    hai nến trước, histogram tăng. BÁN: đối xứng qua đáy, nến ĐỎ, histogram giảm.
+
+    Ánh xạ index histogram: hist tại nến i = macd[i-25] - sig[i-33] (cùng quy ước
+    calcMACD của JS, nơi histogram[j] ứng với candles[33+j]). Vòng lặp bắt đầu
+    i=34 để có sẵn nến i-2 và histogram i-1.
+
+    Khác compute_signals/compute_signals_long ở một chỗ quan trọng: thuật toán
+    này ĐỌC `open` để quyết định (nến xanh/đỏ), không chỉ để hiển thị — xem
+    _with_derived_open.
+    """
+    closes = [c["close"] for c in candles]
+    macd = _macd_values(closes)
+    sig = _ema(macd, 9)
+
+    signals = []
+    in_long = False
+    for i in range(34, len(candles)):
+        cur, prev, prev2 = candles[i], candles[i - 1], candles[i - 2]
+        hist = macd[i - 25] - sig[i - 33]
+        hist_prev = macd[i - 26] - sig[i - 34]
+
+        if not in_long:
+            if (
+                cur["high"] > prev["high"]
+                and cur["low"] > prev["low"]
+                and cur["close"] > cur["open"]
+                and cur["close"] > prev["high"]
+                and cur["close"] > prev2["high"]
+                and hist > hist_prev
+            ):
+                signals.append(
+                    {
+                        "signal": "buy",
+                        "date": _candle_date(cur["time"]),
+                        "price": _body_low(cur),  # neo ở đáy THÂN nến (bỏ râu)
+                    }
+                )
+                in_long = True
+        elif (
+            cur["high"] < prev["high"]
+            and cur["low"] < prev["low"]
+            and cur["close"] < cur["open"]
+            and cur["close"] < prev["low"]
+            and cur["close"] < prev2["low"]
+            and hist < hist_prev
+        ):
+            signals.append(
+                {
+                    "signal": "sell",
+                    "date": _candle_date(cur["time"]),
+                    "price": _body_high(cur),  # neo ở đỉnh THÂN nến (bỏ râu)
+                }
+            )
+            in_long = False
+    return signals
+
+
+
+def compute_signals_long(candles):
+    """BOT Dài hạn — port của generateSignalsLong (indicators.js).
+
+    Y hệt compute_signals nhưng dùng MA50 thay MA20. Vòng lặp bắt đầu i=49:
+    MA50 cần đủ 50 nến (ma50[i-49] hợp lệ khi i>=49), còn Signal của MACD chỉ
+    cần i>=33 nên 49 đã bao trùm.
+    """
+    closes = [c["close"] for c in candles]
+    ma50 = _sma(closes, 50)
+    macd = _macd_values(closes)
+    sig = _ema(macd, 9)
+
+    signals = []
+    in_long = False
+    for i in range(49, len(candles)):
+        close = candles[i]["close"]
+        ma = ma50[i - 49]
+        m = macd[i - 25]
+        s = sig[i - 33]
+        if not in_long:
+            if close > ma and m > s:
+                signals.append(
+                    {
+                        "signal": "buy",
+                        "date": _candle_date(candles[i]["time"]),
+                        "price": _body_low(candles[i]),  # neo ở đáy THÂN nến (bỏ râu)
+                    }
+                )
+                in_long = True
+        elif close < ma and m < s:
+            signals.append(
+                {
+                    "signal": "sell",
+                    "date": _candle_date(candles[i]["time"]),
+                    "price": _body_high(candles[i]),  # neo ở đỉnh THÂN nến (bỏ râu)
+                }
+            )
+            in_long = False
+    return signals
+
+
+# Ba BOT của FE (xem feature/chart/untils/botSignals.js) → thuật toán tương ứng.
+# Bảng này là nguồn DUY NHẤT ánh xạ bot → hàm ở backend; thêm bot mới thì thêm
+# vào đây chứ đừng rải if/else. Khoá `trend` PHẢI trỏ đúng compute_signals —
+# attach_signals (/vn100) vẫn gọi thẳng hàm đó.
+SIGNAL_ALGOS = {
+    "trend": compute_signals,
+    "t": compute_signals_t,
+    "long": compute_signals_long,
+}
+
+
+def prepare_candles_for(bot, candles):
+    """Nến đã sẵn sàng cho thuật toán của `bot`, kèm cờ có phải suy `open` không.
+
+    Chỉ T+ cần: nó ĐỌC `open` để quyết định (nến xanh/đỏ) trong khi `open` là
+    tuỳ chọn ở nến nền. Trend/Dài hạn chỉ dùng `open` để neo giá hiển thị nên
+    trả thẳng nến gốc. Trả (None, False) khi không suy được (xem _with_derived_open).
+    """
+    if bot == "t":
+        return _with_derived_open(candles)
+    return candles, False
+
+
+def latest_signal_for(bot, candles):
+    """Tín hiệu gần nhất theo thuật toán của `bot`. None nếu chưa có tín hiệu.
+    Bot lạ → KeyError (caller đổi thành 400, không được im lặng rơi về Trend)."""
+    sigs = SIGNAL_ALGOS[bot](candles)
+    return sigs[-1] if sigs else None
 
 
 def latest_signal(candles):
@@ -661,12 +846,20 @@ def _live_candle(row, today):
     # tín hiệu cache phiên trước (đúng theo nến ngày đã đóng).
     if close <= 0:
         return None
-    return {
+    candle = {
         "time": int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=VN_TZ).timestamp()),
         "high": high,
         "low": low,
         "close": close,
     }
+    # `open` chỉ để neo giá hiển thị theo THÂN nến (xem _body_low/_body_high) —
+    # try/except riêng: row thiếu open (row test tối giản/nguồn lạ) không được
+    # đánh rớt cả nến live, helper tự fallback về low/high.
+    try:
+        candle["open"] = float(row["open"]) / PRICE_BOARD_SCALE
+    except (KeyError, TypeError, ValueError):
+        pass
+    return candle
 
 
 def _merge_today(base, live):
@@ -758,12 +951,13 @@ def _phantom_candle(last, live, today):
     )
 
 
-def _live_signal(symbol, row, today):
-    """Tín hiệu tính LIVE: ghép nến hôm nay của `row` vào base candles rồi tính lại.
+def live_candles(symbol, row, today):
+    """Nến nền ĐÃ ghép nến hôm nay của `row`, hoặc None nếu không ghép được.
 
-    Thiếu base (chưa refresh/khởi động lại), row thiếu OHLC, hoặc nến live là
-    nến ma (xem _phantom_candle) → None để caller fallback về tín hiệu đã cache
-    (_cache["signals"])."""
+    Tách ra khỏi _live_signal để cả ba bot dùng chung đúng một bộ hàng rào an
+    toàn (base thiếu/cũ, nến ma) — thêm bot mới không được phép chép lại chúng.
+    _live_signal giữ nguyên hành vi: nó chỉ còn là "ghép rồi chấm theo Trend".
+    """
     live = _live_candle(row, today)
     if live is None:
         return None
@@ -778,7 +972,13 @@ def _live_signal(symbol, row, today):
         return None
     if _phantom_candle(base[-1], live, today):
         return None
-    return latest_signal(_merge_today(base, live))
+    return _merge_today(base, live)
+
+
+def _live_signal(symbol, row, today):
+    """Tín hiệu Trend tính LIVE. None → caller fallback về _cache["signals"]."""
+    merged = live_candles(symbol, row, today)
+    return latest_signal(merged) if merged else None
 
 
 def attach_signals(board, now=None):
