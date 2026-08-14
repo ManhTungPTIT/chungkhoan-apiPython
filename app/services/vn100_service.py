@@ -267,10 +267,16 @@ def _vn100_rows(board: list[dict]) -> list[dict]:
 
 
 def _watchlist_rows(board: list[dict]) -> list[dict]:
-    """Rổ của /top-decline: VNALL + toàn sàn HNX (~593 mã) — KHÔNG có UPCOM. Bỏ
-    bước lọc này là UPCOM (biên độ ±15% so với ±7% HOSE) chiếm gần hết bảng giảm
-    mạnh nhất."""
+    """Lọc snapshot về rổ cổ phiếu theo dõi trước khi dựng các bảng xếp hạng."""
     return _in_basket(board, get_symbols())
+
+
+def _hose_rows(board: list[dict]) -> list[dict]:
+    """Chỉ giữ cổ phiếu niêm yết HOSE; chấp nhận nhãn HSX từ nguồn VCI cũ."""
+    return [
+        row for row in board
+        if data_source._normalize_exchange(row.get("exchange")) == "HOSE"
+    ]
 
 
 def get_foreign_trading_board(fetch_fn=data_source.fetch_foreign_board, top_n=20) -> dict:
@@ -386,20 +392,19 @@ def get_top_volume_board(fetch_fn=data_source.fetch_vn100_board, top_n=20) -> di
 
 def build_top_decline_board(board: list[dict], top_n=30) -> dict:
     """Top N mã giảm giá mạnh nhất (change_pct nhỏ nhất, tức âm sâu nhất)
-    trong TOÀN THỊ TRƯỜNG (không giới hạn VN100, không lọc theo value —
-    khác _process của build_top_value_board/build_top_volume_board).
+    trên sàn HOSE (không giới hạn VN100, không lọc theo value — khác _process
+    của build_top_value_board/build_top_volume_board).
 
     Chỉ lọc mã ĐÃ KHỚP LỆNH (price > 0) — mã chưa khớp có change_pct=0 do
     thiếu ref, không phải "đứng giá" thật, nên bị loại để tránh nhiễu Top N."""
-    traded = [x for x in board if (x.get("price") or 0) > 0]
+    traded = [x for x in _hose_rows(board) if (x.get("price") or 0) > 0]
     rows = sorted(traded, key=lambda x: x.get("change_pct") or 0)[:top_n]
     return _value_payload(rows)
 
 
 def get_top_decline_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> dict:
-    """Payload /top-decline-board từ snapshot market_board_full, lọc về rổ
-    get_symbols() (VNALL + toàn sàn HNX — cùng universe với /vn100, KHÔNG dùng
-    get_vn100_members()). Snapshot rỗng → fetch trực tiếp."""
+    """Payload /top-decline-board từ snapshot market_board_full, chỉ lấy HOSE.
+    Snapshot rỗng → fetch trực tiếp rồi áp dụng cùng bộ lọc sàn."""
     rows = _full_board()
     if rows:
         return build_top_decline_board(_watchlist_rows(rows), top_n=top_n)
@@ -413,18 +418,18 @@ def get_top_decline_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> d
 
 def build_top_advance_board(board: list[dict], top_n=30) -> dict:
     """Top N mã tăng giá mạnh nhất (change_pct lớn nhất) — bản đối xứng của
-    build_top_decline_board: cùng rổ, cùng bộ lọc, chỉ đảo chiều sort.
+    build_top_decline_board: cùng rổ HOSE, cùng bộ lọc, chỉ đảo chiều sort.
 
     Cũng chỉ lấy mã ĐÃ KHỚP LỆNH (price > 0): mã chưa khớp có change_pct=0 do
     thiếu ref nên không phải "đứng giá" thật."""
-    traded = [x for x in board if (x.get("price") or 0) > 0]
+    traded = [x for x in _hose_rows(board) if (x.get("price") or 0) > 0]
     rows = sorted(traded, key=lambda x: x.get("change_pct") or 0, reverse=True)[:top_n]
     return _value_payload(rows)
 
 
 def get_top_advance_board(fetch_fn=data_source.fetch_vn100_board, top_n=30) -> dict:
-    """Payload /top-advance-board — cùng nguồn và cùng rổ với /top-decline-board
-    (snapshot market_board_full lọc về get_symbols(): VNALL + toàn sàn HNX)."""
+    """Payload /top-advance-board — cùng nguồn và cùng rổ HOSE với
+    /top-decline-board."""
     rows = _full_board()
     if rows:
         return build_top_advance_board(_watchlist_rows(rows), top_n=top_n)
