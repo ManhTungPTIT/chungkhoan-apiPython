@@ -450,43 +450,36 @@ def _nw_trend(candles):
 
 
 def compute_signals_long(candles):
-    """BOT Dài hạn — port của generateSignalsLong (indicators.js).
+    """BOT Dài hạn (BOT TREND 2) — port của generateSignalsLong (indicators.js).
 
-    Y hệt compute_signals nhưng dùng MA50 thay MA20. Vòng lặp bắt đầu i=49:
-    MA50 cần đủ 50 nến (ma50[i-49] hợp lệ khi i>=49), còn Signal của MACD chỉ
-    cần i>=33 nên 49 đã bao trùm.
+    Tín hiệu phát ở đúng nến mà `trend` của _nw_trend đổi chiều: down→up là MUA,
+    up→down là BÁN. Xem spec 2026-08-15-bot-trend2-nw-design.md.
+
+    ĐỌC `open` để quyết định (nằm trong _hac) trong khi `open` là tuỳ chọn ở nến
+    nền → caller PHẢI đưa nến đã qua _with_derived_open, xem prepare_candles_for.
+
+    Payload BE không có `priceTarget` (chỉ biểu đồ FE hiển thị mức đó), nên phần
+    NW-làm-mức-hiển-thị của bản JS không port sang đây.
     """
-    closes = [c["close"] for c in candles]
-    ma50 = _sma(closes, 50)
-    macd = _macd_values(closes)
-    sig = _ema(macd, 9)
-
+    series = _nw_trend(candles)
     signals = []
-    in_long = False
-    for i in range(49, len(candles)):
-        close = candles[i]["close"]
-        ma = ma50[i - 49]
-        m = macd[i - 25]
-        s = sig[i - 33]
-        if not in_long:
-            if close > ma and m > s:
-                signals.append(
-                    {
-                        "signal": "buy",
-                        "date": _candle_date(candles[i]["time"]),
-                        "price": _body_low(candles[i]),  # neo ở đáy THÂN nến (bỏ râu)
-                    }
-                )
-                in_long = True
-        elif close < ma and m < s:
+    prev_trend = None
+
+    for i, point in enumerate(series):
+        if point is None:
+            continue
+        if prev_trend is not None and point["trend"] != prev_trend:
+            is_buy = point["trend"] == "up"
             signals.append(
                 {
-                    "signal": "sell",
+                    "signal": "buy" if is_buy else "sell",
                     "date": _candle_date(candles[i]["time"]),
-                    "price": _body_high(candles[i]),  # neo ở đỉnh THÂN nến (bỏ râu)
+                    # neo ở thân nến (bỏ râu)
+                    "price": _body_low(candles[i]) if is_buy else _body_high(candles[i]),
                 }
             )
-            in_long = False
+        prev_trend = point["trend"]
+
     return signals
 
 
