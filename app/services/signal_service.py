@@ -180,6 +180,23 @@ def _sma(values, period):
     return out
 
 
+def _wma(values, period):
+    """WMA trọng số tuyến tính; out[j] ứng với values[period-1+j] (như wmaOf trong JS).
+
+    Phiên gần nhất trọng số `period`, xa nhất trọng số 1; mẫu số period*(period+1)/2.
+    """
+    if len(values) < period:
+        return []
+    denom = period * (period + 1) / 2
+    out = []
+    for i in range(period - 1, len(values)):
+        total = 0.0
+        for w in range(period):
+            total += values[i - period + 1 + w] * (w + 1)
+        out.append(total / denom)
+    return out
+
+
 def _macd_values(closes):
     """Mảng MACD(12,26,9); macd[m] ứng với closes[25+m] (như calcMACD trong JS)."""
     ema12 = _ema(closes, 12)
@@ -379,6 +396,57 @@ def compute_signals_t(candles):
             in_long = False
     return signals
 
+
+
+# BOT Dài hạn (BOT TREND 2) — hằng số cứng, khớp indicators.js.
+NW_WMA_PERIOD = 10
+NW_K = 3
+
+
+def _hac(candle):
+    """Giá xác định xu hướng: trung bình của chính cây nến đó. Trùng công thức
+    "HA Close" nhưng KHÔNG đệ quy — không có HA open ở đây."""
+    return (candle["open"] + candle["high"] + candle["low"] + candle["close"]) / 4
+
+
+def _nw_trend(candles):
+    """Ngưỡng động NW — port của calcNwTrend (indicators.js).
+
+    Trả mảng THẲNG HÀNG với `candles` (None cho 9 nến warm-up). Trong xu hướng
+    tăng NW chỉ đi ngang hoặc đi lên; xu hướng giảm thì ngược lại.
+
+    ĐỌC `open` (nằm trong _hac) → caller phải đưa nến đã qua _with_derived_open.
+    """
+    out = [None] * len(candles)
+    wma = _wma([c["high"] - c["low"] for c in candles], NW_WMA_PERIOD)
+    if not wma:
+        return out
+
+    seed = NW_WMA_PERIOD - 1
+    trend = "down"
+    nw = _hac(candles[seed]) + NW_K * wma[0]
+    out[seed] = {"nw": nw, "trend": trend}
+
+    for i in range(seed + 1, len(candles)):
+        hac = _hac(candles[i])
+        rev = NW_K * wma[i - seed]
+
+        if trend == "up":
+            # So sánh CHẶT: hac == nw không lật trạng thái.
+            if hac < nw:
+                trend = "down"
+                nw = hac + rev
+            else:
+                nw = max(nw, hac - rev)
+        elif hac > nw:
+            trend = "up"
+            nw = hac - rev
+        else:
+            nw = min(nw, hac + rev)
+
+        out[i] = {"nw": nw, "trend": trend}
+
+    return out
 
 
 def compute_signals_long(candles):
