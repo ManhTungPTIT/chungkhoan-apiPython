@@ -120,8 +120,9 @@ def build_overlay(bot, now=None):
             "hold": entry["signal"] == "buy" and entry["date"] != today,
             "stale": stale,
         }
-        # Chỉ T+ mới có khái niệm này — đừng gắn cờ chết vào hai bot kia.
-        if bot == "t":
+        # T+ và Dài hạn đều suy `open` (prepare_candles_for) — Trend thì không,
+        # đừng gắn cờ chết vào nó.
+        if bot in ("t", "long"):
             item["open_derived"] = derived
         data[symbol] = item
 

@@ -300,7 +300,7 @@ def compute_signals(candles):
     return signals
 
 def _with_derived_open(candles):
-    """Lấp `open` thiếu bằng close của nến TRƯỚC, cho riêng đường T+.
+    """Lấp `open` thiếu bằng close của nến TRƯỚC, dùng cho cả T+ lẫn Dài hạn.
 
     Trả (candles, derived). `derived=True` nghĩa là ít nhất một nến phải suy —
     caller gắn cờ `open_derived` để chỗ lệch với biểu đồ truy được.
@@ -313,7 +313,7 @@ def _with_derived_open(candles):
     có `open` THẬT — nên đúng nhóm mã phải suy là nhóm bảng và biểu đồ có thể lệch.
 
     KHÔNG sửa tại chỗ: `_history_candles` dùng chung cho mọi bot, sửa vào đó là
-    Trend/Dài hạn đọc phải `open` bịa ra (chúng dùng `open` để neo giá hiển thị).
+    Trend đọc phải `open` bịa ra (nó dùng `open` để neo giá hiển thị).
     """
     if not candles:
         return [], False
@@ -346,9 +346,8 @@ def compute_signals_t(candles):
     calcMACD của JS, nơi histogram[j] ứng với candles[33+j]). Vòng lặp bắt đầu
     i=34 để có sẵn nến i-2 và histogram i-1.
 
-    Khác compute_signals/compute_signals_long ở một chỗ quan trọng: thuật toán
-    này ĐỌC `open` để quyết định (nến xanh/đỏ), không chỉ để hiển thị — xem
-    _with_derived_open.
+    Khác compute_signals ở một chỗ quan trọng: thuật toán này ĐỌC `open` để
+    quyết định (nến xanh/đỏ), không chỉ để hiển thị — xem _with_derived_open.
     """
     closes = [c["close"] for c in candles]
     macd = _macd_values(closes)
@@ -497,11 +496,13 @@ SIGNAL_ALGOS = {
 def prepare_candles_for(bot, candles):
     """Nến đã sẵn sàng cho thuật toán của `bot`, kèm cờ có phải suy `open` không.
 
-    Chỉ T+ cần: nó ĐỌC `open` để quyết định (nến xanh/đỏ) trong khi `open` là
-    tuỳ chọn ở nến nền. Trend/Dài hạn chỉ dùng `open` để neo giá hiển thị nên
-    trả thẳng nến gốc. Trả (None, False) khi không suy được (xem _with_derived_open).
+    T+ và Dài hạn đều ĐỌC `open` để quyết định — T+ xem nến xanh/đỏ, Dài hạn đưa
+    `open` vào HAC = (O+H+L+C)/4 — trong khi `open` là tuỳ chọn ở nến nền. Trend
+    chỉ dùng `open` để neo giá hiển thị nên trả thẳng nến gốc.
+
+    Trả (None, False) khi không suy được (xem _with_derived_open).
     """
-    if bot == "t":
+    if bot in ("t", "long"):
         return _with_derived_open(candles)
     return candles, False
 
