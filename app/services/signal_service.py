@@ -305,7 +305,7 @@ def _with_derived_open(candles):
     Trả (candles, derived). `derived=True` nghĩa là ít nhất một nến phải suy —
     caller gắn cờ `open_derived` để chỗ lệch với biểu đồ truy được.
     Nến ĐẦU dãy thiếu `open` → (None, False): không có mốc nào để suy, mã đó bị
-    bỏ khỏi bảng T+.
+    bỏ khỏi bảng T+ lẫn bảng Dài hạn.
 
     ĐÁNH ĐỔI (spec §5): T+ dùng `close > open` = "nến xanh"; thay `open` bằng
     close phiên trước biến nó thành `close > close[k-1]` = "tăng so phiên trước".

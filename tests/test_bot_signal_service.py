@@ -192,6 +192,22 @@ class TestOpenDerived:
         entry = bot_signal_service.build_overlay("trend", now=NOW)["data"]["AAA"]
         assert "open_derived" not in entry
 
+    def test_long_survives_derived_open_past_nw_warmup(self, candles):
+        """Hồi quy: mã "long" thiếu `open` ở nến 80 (>> 9 nến warm-up NW,
+        NW_WMA_PERIOD=10) từng ném KeyError('open') xuyên suốt đường overlay đầy
+        đủ — build_overlay → _entry → latest_signal_for → compute_signals_long —
+        vì trước 15/08/2026 "long" không đi qua _with_derived_open. Giờ phải
+        chạy trọn không lỗi, và mã vẫn có mặt trong payload."""
+        holed = [dict(c) for c in candles]
+        del holed[80]["open"]
+        signal_service._history_candles["AAA"] = holed
+        _publish_board([_row("AAA", 55.0)])
+
+        data = bot_signal_service.build_overlay("long", now=NOW)["data"]
+
+        assert "AAA" in data
+        assert data["AAA"]["open_derived"] is True
+
     def test_prepare_candles_derives_open_for_long(self):
         candles = [
             {"time": 1, "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5},

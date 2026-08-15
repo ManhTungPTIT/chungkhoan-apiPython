@@ -62,7 +62,7 @@ def _entry(bot, symbol, row, today, market_base):
         return None, False, False
 
     prepared, derived = signal_service.prepare_candles_for(bot, candles)
-    if prepared is None:  # T+ không suy được `open` (nến đầu dãy đã thiếu)
+    if prepared is None:  # T+/Dài hạn không suy được `open` (nến đầu dãy đã thiếu)
         return None, False, False
 
     if merged:
