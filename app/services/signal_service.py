@@ -397,7 +397,7 @@ def compute_signals_t(candles):
 
 
 
-# BOT Dài hạn (BOT TREND 2) — hằng số cứng, khớp indicators.js.
+# BOT Dài hạn — hằng số cứng, khớp indicators.js.
 NW_WMA_PERIOD = 10
 NW_K = 3
 
