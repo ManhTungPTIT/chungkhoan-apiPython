@@ -5,7 +5,7 @@
 
 # Pin bản cụ thể: @main không pin khiến prod kéo bản khác local → đổi shape
 # symbols_by_industries làm hỏng heatmap/sectors. 4.0.4 là bản đã verify.
-vnstock==4.0.4
+vnstock==4.0.8
 # Xác thực tier sponsor lúc khởi động (vnstock_license.ensure_license, xem
 # vnai TIER_LIMITS). Thiếu gói này thì API key chỉ được tính Community 60 req/phút.
 vnii==0.2.5
